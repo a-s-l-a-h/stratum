@@ -1,0 +1,132 @@
+{
+  "android_version": "35",
+  "mode": "full",
+  "targets": [
+    {
+      "fqn": "android.app.Activity",
+      "enabled": true,
+      "priority": 1,
+      "notes": "core lifecycle"
+    },
+    {
+      "fqn": "android.view.View",
+      "enabled": true,
+      "priority": 1,
+      "notes": "base of everything"
+    },
+    {
+      "fqn": "android.view.ViewGroup",
+      "enabled": true,
+      "priority": 1,
+      "notes": "layout base"
+    },
+    {
+      "fqn": "android.widget.Button",
+      "enabled": true,
+      "priority": 1,
+      "notes": "core UI"
+    },
+    {
+      "fqn": "android.widget.TextView",
+      "enabled": true,
+      "priority": 1,
+      "notes": "text display"
+    },
+    {
+      "fqn": "android.widget.EditText",
+      "enabled": true,
+      "priority": 1,
+      "notes": "text input"
+    },
+    {
+      "fqn": "android.widget.ImageView",
+      "enabled": true,
+      "priority": 1,
+      "notes": "image display"
+    },
+    {
+      "fqn": "android.widget.LinearLayout",
+      "enabled": true,
+      "priority": 1,
+      "notes": "layout"
+    },
+    {
+      "fqn": "android.widget.FrameLayout",
+      "enabled": true,
+      "priority": 1,
+      "notes": "layout"
+    },
+    {
+      "fqn": "android.widget.RecyclerView",
+      "enabled": false,
+      "priority": 2,
+      "notes": "list display"
+    },
+    {
+      "fqn": "android.content.Context",
+      "enabled": true,
+      "priority": 1,
+      "notes": "Android context"
+    },
+    {
+      "fqn": "android.content.Intent",
+      "enabled": true,
+      "priority": 1,
+      "notes": "navigation"
+    },
+    {
+      "fqn": "android.os.Bundle",
+      "enabled": true,
+      "priority": 1,
+      "notes": "data passing"
+    },
+    {
+      "fqn": "android.os.Handler",
+      "enabled": true,
+      "priority": 2,
+      "notes": "thread posting"
+    },
+    {
+      "fqn": "android.hardware.SensorManager",
+      "enabled": true,
+      "priority": 2,
+      "notes": "sensors"
+    },
+    {
+      "fqn": "android.hardware.camera2.CameraManager",
+      "enabled": true,
+      "priority": 1,
+      "notes": "camera"
+    },
+    {
+      "fqn": "android.hardware.camera2.CameraDevice",
+      "enabled": true,
+      "priority": 1,
+      "notes": "camera"
+    },
+    {
+      "fqn": "android.media.AudioRecord",
+      "enabled": true,
+      "priority": 2,
+      "notes": "audio"
+    },
+    {
+      "fqn": "android.graphics.Bitmap",
+      "enabled": true,
+      "priority": 1,
+      "notes": "image data"
+    },
+    {
+      "fqn": "android.location.LocationManager",
+      "enabled": true,
+      "priority": 2,
+      "notes": "GPS"
+    },
+    {
+      "fqn": "android.widget.DatePicker",
+      "enabled": false,
+      "priority": 3,
+      "notes": "skip for now"
+    }
+  ]
+}

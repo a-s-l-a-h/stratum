@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "closure_mode": "parents_only",
+  "targets": [
+    { "fqn": "android.app.Activity" },
+    { "fqn": "android.view.ContextThemeWrapper" },
+    { "fqn": "android.content.ContextWrapper" },
+    { "fqn": "android.content.Context" },
+    { "fqn": "android.view.View" },
+    { "fqn": "android.view.ViewGroup" },
+    { "fqn": "android.widget.TextView" },
+    { "fqn": "android.widget.Button" },
+    { "fqn": "android.widget.LinearLayout" }
+  ]
+}

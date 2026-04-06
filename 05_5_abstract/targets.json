@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "avoid": [
+    "android.app.admin.NetworkEvent"
+  ],
+  "targets": [
+    {
+      "fqn": "android.hardware.camera2.CameraDevice$StateCallback"
+    },
+    {
+      "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback"
+    },
+    { "fqn": "android.view.TextureView$SurfaceTextureListener" }
+  ]
+}

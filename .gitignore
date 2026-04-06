@@ -1,0 +1,48 @@
+# ── Stratum Pipeline Outputs & Notes ──────────────────────────────────────────
+# Ignores any directory named "output" or "output_java" anywhere in the project
+output/
+output_java/
+
+# Ignores all "note.txt" files across all folders (00_setup, 01_extract, etc.)
+note.txt
+
+# ── Fullcode ──────────────────────────────────────────────────────────────────
+# Ignore the entire fullcode directory at the root
+/fullcode/
+
+# ── Third Party ───────────────────────────────────────────────────────────────
+# Ignore everything inside the third_party folder...
+/third_party/*
+# ...BUT explicitly keep the README.md inside it
+!/third_party/README.md
+
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+# The /runtime/ folder is automatically tracked by Git (including its README.md)
+
+# ── Keep all Markdown files (Safeguard) ───────────────────────────────────────
+# Ensures all README.md files are kept safe
+!*.md
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+*.so
+*.o
+*.a
+*.whl
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── IDE & OS Files ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
