@@ -1,4 +1,4 @@
-# Stratum (v0.2)
+# Stratum 
 
 > **A code generation pipeline that automatically creates a JNI/nanobind C++ bridge**
 
