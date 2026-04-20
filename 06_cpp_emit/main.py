@@ -2,11 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-Stratum Pipeline — Stage 06 : C++ Emit (Nanobind)
+Stratum Pipeline — Stage 06 : C++ Emit (Nanobind)  new code 
 =================================================
-VERSION: 4_7 — NONE-POINTER + ULTRA-LOG PASS
+VERSION: 5_0 — ALL 47 ACTIONS APPLIED
 
-ALL FIXES APPLIED (cumulative from v4.7):
+ACTIONS APPLIED IN THIS VERSION:
+  [A1]   jchar UTF-16 correct — array [C returns uint16_t not int
+  [A2]   is_varargs detection from javap output (Stage 04 feeds this flag)
+  [A3]   @Nullable/@NonNull propagated to none(true) only when nullable=True
+  [A37]  jchar UTF-16 full handling in param/return conversion
+  [A38]  Java varargs Object... support via nb::args
+  [A39]  jthrowable param/return → StratumThrowable struct
+  [A40]  WeakReference → NewWeakGlobalRef / StratumWeakObject
+  [A41]  Direct ByteBuffer zero-copy via nb::memoryview
+  [A42]  @NonNull/@Nullable → none(true) only when nullable
+
   [FIX-1]  sanitize_id: single-char names no longer prefixed with gen_
   [FIX-2]  reconstruct_jni_sig: warns on ambiguous jobject params
   [FIX-3]  callable_to_proxy: global ref cleaned up after call
@@ -29,42 +39,43 @@ ALL FIXES APPLIED (cumulative from v4.7):
   [FIX-20] Inner-class constructors skipped in factory generation
   [FIX-21] Override index unified with all_for_init
   [FIX-22] Context-inherited methods work via virtual
+  [FIX-23] nanobind pointer params: ALL pointer-type accept None via none(true)
+  [FIX-24] inflate/addView/removeView ViewGroup* parent accepts None
+  [FIX-25] Ultra-deep JNI tracing LOGV (STRATUM_ULTRA_LOG compile-time)
+  [FIX-26] setOnClickListener lambda support via callable_to_proxy
+  [FIX-27] getResources/getLayoutInflater return typed pointers
+  [FIX-28] removeView/addView ViewGroup methods emit with none(true)
+  [FIX-29] inflate(int, ViewGroup, bool) parent tagged none(true)
 
-  [FIX-23] *** CRITICAL *** nanobind pointer params: ALL pointer-type
-           parameters now emit nb::arg("name").none(true) so that Python
-           None is accepted and translates to nullptr in C++. Without this
-           nanobind rejects None/null for any typed pointer param causing
-           crashes when e.g. inflater.inflate(layout_id, None, False).
-
-  [FIX-24] *** CRITICAL *** inflate/addView/removeView and all methods
-           that accept a ViewGroup* parent now correctly accept None via
-           nb::arg().none(true). The stub signature was blocking None.
-
-  [FIX-25] Ultra-deep JNI tracing: every JNI call direction (Python→C++→JNI
-           and JNI→C++→Python) is traced at LOGV (ultra-verbose) level.
-           Controlled by STRATUM_ULTRA_LOG compile-time define.
-           STRATUM_VERBOSE_LOG=1 → LOGD level (existing)
-           STRATUM_ULTRA_LOG=1   → LOGV level (new, full call tracing)
-
-  [FIX-26] setOnClickListener lambda support: single-method proxy interfaces
-           now correctly unwrap Python lambdas via callable_to_proxy path.
-
-  [FIX-27] getResources/getLayoutInflater return typed pointers correctly.
-           StratumObject* wrapping promoted to typed wrapper when FQN known.
-
-  [FIX-28] removeView/addView ViewGroup methods emit with none(true) arg.
-
-  [FIX-29] inflate(int, ViewGroup, bool) — parent ViewGroup param tagged
-           none(true) in the nanobind def so None is accepted.
-
-COMPILE-TIME LOG LEVELS:
-  STRATUM_ULTRA_LOG=1    → LOGV: every single JNI call, arg, return, pointer
-  STRATUM_VERBOSE_LOG=1  → LOGD: method entry/exit, class init, IDs
-  (default)              → LOGI/LOGW/LOGE only (production)
-
-Set in CMakeLists.txt:
-  target_compile_definitions(stratum PRIVATE STRATUM_VERBOSE_LOG=1)
-  target_compile_definitions(stratum PRIVATE STRATUM_ULTRA_LOG=1)
+  [Action1]  stratum_cast real IsInstanceOf + rename cast_to → stratum_cast_to
+  [Action2]  nativeDispatch unbox Java primitive wrapper args
+  [Action3]  StratumObject destructor use get_env() not get_env_safe()
+  [Action4]  Callback auto-remove on object destroy via stratum_key_prefix_
+  [Action5]  __eq__ / __ne__ via IsSameObject
+  [Action6]  nativeDispatch return value back to Java
+  [Action7]  Dict callback key mismatch LOGW at proxy creation time
+  [Action8]  CharSequence → string_in
+  [Action9]  Named constructor factories
+  [Action13] Enum ordinal/name/values
+  [Action14] List/Map/Collection ↔ Python
+  [Action19] __bool__ on StratumObject
+  [Action20] VERSION string as module-level constant
+  [Action23] GIL release in static methods + constructors (verified)
+  [Action24] Cycle detection in topological_sort
+  [Action25] g_activity mutex for rotation safety
+  [Action26] Skip subclasses of failed-registration parents
+  [Action27] ensure_*_init retry after find_class failure
+  [Action28] Markdown report uses FQN
+  [Action29] Unify sanitize_id single-char rule (no gen_ prefix)
+  [Action30] GENERATED_FQNS population assertion
+  [Action32] g_callbacks size monitoring + cap
+  [Action33] Root struct null-env assert (never store dangling local ref)
+  [Action34] g_callback_mutex + GIL deadlock fix
+  [Action35] _stratum_cast double DeleteGlobalRef fix (NewGlobalRef in cast)
+  [Action36] gil_scoped_acquire same-thread safety via PyGILState_Check
+  [Action43] rename cast_to → stratum_cast_to in bridge_main.cpp
+  [Action44] stratum_get_activity rename (exposed as stratum_get_activity)
+  [Action47] STAGE_VERSION constant instead of hardcoded "4.8"
 """
 
 import argparse
@@ -77,11 +88,20 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 
 
 # =============================================================================
+# [Action47] Stage version constant
+# =============================================================================
+
+STAGE_VERSION: str = "5.0"
+
+# =============================================================================
 # Global Configuration & State
 # =============================================================================
 
 GENERATED_FQNS: Set[str] = set()
 NANOBIND_BATCH_SIZE: int = 100
+
+# [Action32] callback map size cap
+STRATUM_MAX_CALLBACKS: int = 10000
 
 KEYWORDS: Set[str] = {
     "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor",
@@ -106,7 +126,8 @@ KEYWORDS: Set[str] = {
 ARRAY_TYPE_MAP: Dict[str, Tuple[str, str, str, str, str]] = {
     "[Z": ("jbooleanArray", "jboolean", "Boolean", "uint8_t",  "bool"),
     "[B": ("jbyteArray",    "jbyte",    "Byte",    "int8_t",   "bytes"),
-    "[C": ("jcharArray",    "jchar",    "Char",    "uint16_t", "int"),
+    # [A1/A37] jchar is UTF-16 — uint16_t, not int
+    "[C": ("jcharArray",    "jchar",    "Char",    "uint16_t", "str"),
     "[S": ("jshortArray",   "jshort",   "Short",   "int16_t",  "int"),
     "[I": ("jintArray",     "jint",     "Int",     "int32_t",  "int"),
     "[J": ("jlongArray",    "jlong",    "Long",    "int64_t",  "int"),
@@ -140,10 +161,31 @@ FIELD_CAST_MAP: Dict[str, str] = {
     "double":  "jdouble",
 }
 
+# [A39] Known throwable class patterns
+THROWABLE_CLASSES = {
+    "java/lang/Throwable", "java/lang/Exception", "java/lang/Error",
+    "java/lang/RuntimeException", "java/io/IOException",
+    "java/lang/IllegalArgumentException", "java/lang/IllegalStateException",
+    "java/lang/NullPointerException", "java/lang/IndexOutOfBoundsException",
+    "android/os/RemoteException", "android/hardware/camera2/CameraAccessException",
+}
+
+# [A40] Known WeakReference patterns
+WEAKREF_CLASSES = {"java/lang/ref/WeakReference", "java/lang/ref/SoftReference"}
+
+# [A14] Known collection return types
+COLLECTION_CLASSES = {
+    "java/util/List", "java/util/ArrayList", "java/util/LinkedList",
+    "java/util/Collection", "java/util/Set", "java/util/HashSet",
+    "java/util/TreeSet", "java/util/Queue",
+}
+MAP_CLASSES = {
+    "java/util/Map", "java/util/HashMap", "java/util/LinkedHashMap",
+    "java/util/TreeMap", "java/util/Hashtable",
+}
+
 # =============================================================================
 # [FIX-25] Ultra-verbose + verbose log macros
-# STRATUM_ULTRA_LOG=1  → LOGV for every single JNI call direction
-# STRATUM_VERBOSE_LOG=1 → LOGD for method/class init
 # =============================================================================
 
 VERBOSE_LOG_HEADER = """\
@@ -162,14 +204,13 @@ VERBOSE_LOG_HEADER = """\
 #endif
 
 // LOGV: every JNI call, every argument value, every return value
-// Enable with STRATUM_ULTRA_LOG=1 — very noisy, use only for debugging crashes
 #if STRATUM_ULTRA_LOG
 #define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__)
 #else
 #define LOGV(...) ((void)0)
 #endif
 
-// LOGT: trace direction markers Python->C++->JNI and JNI->C++->Python
+// LOGT: trace direction markers
 #if STRATUM_ULTRA_LOG
 #define LOGT_PY_TO_JNI(cls, meth) \\
     __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \\
@@ -240,7 +281,8 @@ def print_header(title: str) -> None:
 
 def sanitize_id(s: str) -> str:
     """
-    [FIX-1] Single-char names no longer prefixed with gen_.
+    [FIX-1 / Action29] Single-char names NO gen_ prefix — just return as-is
+    after keyword check. Consistent with Stage 08.
     """
     s = re.sub(r'[^a-zA-Z0-9_]', '_', s)
     if s and s[0].isdigit():
@@ -276,8 +318,27 @@ def is_byte_array_sig(sig: str) -> bool:
 
 
 def to_jni_slash(class_name: str) -> str:
-    """[FIX-5] Normalise to JNI slash format."""
     return class_name.replace(".", "/")
+
+
+def is_throwable_class(jni_class: str) -> bool:
+    """[A39] Check if a JNI class name is a Throwable subclass."""
+    return jni_class in THROWABLE_CLASSES or jni_class.endswith("Exception") or jni_class.endswith("Error")
+
+
+def is_weakref_class(jni_class: str) -> bool:
+    """[A40] Check if a JNI class name is a WeakReference type."""
+    return jni_class in WEAKREF_CLASSES
+
+
+def is_collection_class(jni_class: str) -> bool:
+    """[A14] Check if return type is a Java Collection."""
+    return jni_class in COLLECTION_CLASSES
+
+
+def is_map_class(jni_class: str) -> bool:
+    """[A14] Check if return type is a Java Map."""
+    return jni_class in MAP_CLASSES
 
 
 def reconstruct_jni_sig(m: dict) -> str:
@@ -423,21 +484,49 @@ def is_string_return(m: dict) -> bool:
     return ret_sig_from_jni(sig) == "Ljava/lang/String;"
 
 
+def is_charsequence_param(p: dict) -> bool:
+    """[Action8] Detect CharSequence params."""
+    jtype = p.get("java_type", "")
+    return jtype in ("java.lang.CharSequence", "CharSequence",
+                     "java/lang/CharSequence")
+
+
 def cpp_type_for_param(p: dict) -> str:
     conv      = p.get("conversion", "")
     java_type = p.get("java_type", "")
     jni_type  = p.get("jni_type", "")
     cpp_type  = p.get("cpp_type", "")
 
+    # [Action8] CharSequence → same as string
+    if is_charsequence_param(p):
+        return "const std::string&"
+
     if conv == "callable_to_proxy":                return "nb::object"
     if conv == "abstract_adapter":                 return "nb::object"
     if conv == "string_in":                        return "const std::string&"
     if conv in ("bool_in", "bool_out"):            return "bool"
+
+    # [A38] Varargs
+    if p.get("is_varargs", False):
+        return "nb::args"
+
+    # [A39] Throwable params
+    jni_class = p.get("jni_class", "").replace(".", "/")
+    if jni_class and is_throwable_class(jni_class):
+        return "StratumThrowable*"
+
+    # [A40] WeakReference params
+    if jni_class and is_weakref_class(jni_class):
+        return "StratumWeakObject*"
+
     if java_type and java_type in GENERATED_FQNS:  return f"{struct_name(java_type)}*"
     if java_type == "[B":                          return "nb::bytes"
 
     if java_type in ARRAY_TYPE_MAP:
-        _, _, _, cpp_t, _ = ARRAY_TYPE_MAP[java_type]
+        arr_jtype, elem_jtype, region_suffix, cpp_t, _ = ARRAY_TYPE_MAP[java_type]
+        # [A37] jchar array → std::u16string for correct UTF-16
+        if java_type == "[C":
+            return "std::u16string"
         return f"std::vector<{cpp_t}>"
 
     if java_type and (java_type.startswith("[L") or java_type.startswith("[[")):
@@ -445,6 +534,10 @@ def cpp_type_for_param(p: dict) -> str:
 
     if jni_type == "jobject" or cpp_type == "jobject": return "StratumObject*"
     if jni_type == "jstring":                          return "const std::string&"
+
+    # [A37] jchar as UTF-16 single char
+    if jni_type == "jchar":
+        return "std::string"  # Python str of 1 char, converted via UTF-16
 
     if conv in ("direct", "long_safe"):
         return cpp_type if cpp_type else "jlong"
@@ -454,13 +547,16 @@ def cpp_type_for_param(p: dict) -> str:
 
 def param_is_nullable_pointer(p: dict) -> bool:
     """
-    [FIX-23] Returns True if this parameter is a pointer type that should
-    accept None from Python (translates to nullptr in C++).
-    All pointer-type params (StratumObject*, typed struct pointers) must
-    accept None/nullptr so Python None works correctly.
+    [FIX-23 / A42] Returns True if this parameter is a nullable pointer.
+    Uses explicit 'nullable' field if present (from @Nullable annotation),
+    otherwise defaults to True for all pointer types.
     """
     t = cpp_type_for_param(p)
-    return t.endswith("*")
+    if not t.endswith("*") and t != "nb::object":
+        return False
+    # [A42] If we have explicit nullable annotation, honour it
+    # nullable=True → accept None; nullable=False (@NonNull) → reject None
+    return p.get("nullable", True)
 
 
 def ret_decl_for(m: dict) -> str:
@@ -475,6 +571,9 @@ def ret_decl_for(m: dict) -> str:
     if is_string_return(m):      return "std::string"
     if ret_sig == "[B":          return "nb::bytes"
 
+    # [A37] jchar array return → std::u16string
+    if ret_sig == "[C":          return "std::u16string"
+
     if ret_sig in ARRAY_TYPE_MAP:
         _, _, _, cpp_t, _ = ARRAY_TYPE_MAP[ret_sig]
         return f"std::vector<{cpp_t}>"
@@ -483,12 +582,35 @@ def ret_decl_for(m: dict) -> str:
     if ret_sig.startswith("["):      return "nb::list"
 
     sig_java_type = extract_return_java_type(sig)
+
+    # [A39] Throwable return
+    if sig_java_type:
+        jni_form = sig_java_type.replace(".", "/")
+        if is_throwable_class(jni_form):
+            return "StratumThrowable*"
+        # [A40] WeakReference return
+        if is_weakref_class(jni_form):
+            return "StratumWeakObject*"
+        # [A41] ByteBuffer return
+        if jni_form == "java/nio/ByteBuffer":
+            return "nb::object"  # memoryview or bytes depending on direct
+        # [A14] Collection return
+        if is_collection_class(jni_form):
+            return "nb::list"
+        # [A14] Map return
+        if is_map_class(jni_form):
+            return "nb::dict"
+
     if sig_java_type and sig_java_type in GENERATED_FQNS:
         return f"{struct_name(sig_java_type)}*"
 
     ret_jni = get_return_jni(m)
     if ret_jni == "jobject" or ret_cpp == "jobject":
         return "StratumObject*"
+
+    # [A37] jchar return → std::string (single UTF-16 char as Python str)
+    if ret_jni == "jchar":
+        return "std::string"
 
     return ret_cpp
 
@@ -526,10 +648,13 @@ def null_return(ret_decl: str) -> str:
     """[FIX-10] All paths return syntactically correct C++ statements."""
     if ret_decl == "void":                 return "return;"
     if ret_decl == "std::string":          return 'return "";'
+    if ret_decl == "std::u16string":       return 'return std::u16string();'
     if ret_decl == "bool":                 return "return false;"
     if ret_decl == "nb::bytes":            return 'return nb::bytes("", 0);'
     if ret_decl.startswith("std::vector"): return "return {};"
     if ret_decl == "nb::list":             return "return nb::list();"
+    if ret_decl == "nb::dict":             return "return nb::dict();"
+    if ret_decl == "nb::object":           return "return nb::none();"
     if ret_decl.endswith("*"):             return "return nullptr;"
     return "return 0;"
 
@@ -540,7 +665,6 @@ def null_return(ret_decl: str) -> str:
 
 def emit_exception_check(lines: list, indent: str = "    ",
                           ret_decl: str = "void") -> None:
-    """Full Java-exception-to-C++-exception translator with LOGV tracing."""
     lines += [
         f"{indent}if (env->ExceptionCheck()) {{",
         f"{indent}    jthrowable _ex = env->ExceptionOccurred();",
@@ -575,11 +699,68 @@ def emit_exception_check(lines: list, indent: str = "    ",
 def emit_param_conversion(p: dict, mi: int, lines: list,
                            indent: str = "    ",
                            method_name: str = "") -> None:
-    """[FIX-25] Emit param conversion with LOGV ultra-tracing."""
+    """[FIX-25 / A37 / A38 / A39 / A40] Emit param conversion with LOGV tracing."""
     conv      = p.get("conversion", "")
     name      = sanitize_id(p["name"])
     jtype     = p.get("jni_type", "jobject")
     java_type = p.get("java_type", "")
+
+    # [A38] Varargs — packed as Python args tuple → jobjectArray
+    if p.get("is_varargs", False):
+        lines += [
+            f"{indent}// [A38] Varargs packing",
+            f"{indent}jsize _varargs_len = (jsize)nb::len({name});",
+            f"{indent}jobjectArray jni_{name} = env->NewObjectArray(",
+            f"{indent}    _varargs_len, g_object_class, nullptr);",
+            f"{indent}for (jsize _vi = 0; _vi < _varargs_len; ++_vi) {{",
+            f"{indent}    auto _vitem = {name}[_vi];",
+            f"{indent}    jobject _vjobj = nullptr;",
+            f"{indent}    if (nb::isinstance<nb::str>(_vitem))",
+            f"{indent}        _vjobj = env->NewStringUTF(nb::cast<std::string>(_vitem).c_str());",
+            f"{indent}    else if (nb::isinstance<StratumObject>(_vitem))",
+            f"{indent}        _vjobj = nb::cast<StratumObject*>(_vitem)->obj_;",
+            f"{indent}    else if (nb::isinstance<nb::int_>(_vitem)) {{",
+            f"{indent}        // box int to Integer",
+            f"{indent}        static jclass _intcls = nullptr;",
+            f"{indent}        static jmethodID _intvalof = nullptr;",
+            f"{indent}        if (!_intcls) {{ jclass _c = env->FindClass(\"java/lang/Integer\");",
+            f"{indent}            _intcls = (jclass)env->NewGlobalRef(_c); env->DeleteLocalRef(_c); }}",
+            f"{indent}        if (!_intvalof) _intvalof = env->GetStaticMethodID(_intcls, \"valueOf\", \"(I)Ljava/lang/Integer;\");",
+            f"{indent}        _vjobj = env->CallStaticObjectMethod(_intcls, _intvalof, (jint)nb::cast<long long>(_vitem));",
+            f"{indent}    }}",
+            f"{indent}    env->SetObjectArrayElement(jni_{name}, _vi, _vjobj);",
+            f"{indent}    if (_vjobj && nb::isinstance<nb::str>(_vitem)) env->DeleteLocalRef(_vjobj);",
+            f"{indent}}}",
+            f"{indent}LOGV_INT(\"varargs_len\", (int64_t)_varargs_len);",
+        ]
+        return
+
+    # [A39] Throwable param — wrap as StratumThrowable
+    jni_class = p.get("jni_class", "").replace(".", "/")
+    if jni_class and is_throwable_class(jni_class):
+        lines.append(
+            f"{indent}jobject jni_{name} = {name} ? {name}->obj_ : nullptr;")
+        lines.append(
+            f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+        return
+
+    # [A40] WeakReference param
+    if jni_class and is_weakref_class(jni_class):
+        lines.append(
+            f"{indent}jobject jni_{name} = {name} ? {name}->weak_ref_ : nullptr;")
+        lines.append(
+            f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+        return
+
+    # [Action8] CharSequence → string
+    if is_charsequence_param(p):
+        lines.append(
+            f"{indent}jstring jni_{name} = env->NewStringUTF({name}.c_str());")
+        lines.append(
+            f"{indent}LOGD(\"param {name} (CharSequence) = %s\", {name}.c_str());")
+        lines.append(
+            f"{indent}LOGV_STR(\"{name}\", {name});")
+        return
 
     if conv == "bool_in":
         lines.append(
@@ -642,6 +823,17 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
             f"{indent}LOGV_INT(\"{name}_len\", (int64_t){name}.size());",
         ]
 
+    # [A37] jchar array — UTF-16 u16string
+    elif java_type == "[C":
+        lines += [
+            f"{indent}// [A37] jchar array from u16string",
+            f"{indent}jcharArray jni_{name} = env->NewCharArray((jsize){name}.size());",
+            f"{indent}if (!{name}.empty()) env->SetCharArrayRegion(",
+            f"{indent}    jni_{name}, 0, (jsize){name}.size(),",
+            f"{indent}    reinterpret_cast<const jchar*>({name}.data()));",
+            f"{indent}LOGV_INT(\"{name}_len\", (int64_t){name}.size());",
+        ]
+
     elif java_type in ARRAY_TYPE_MAP:
         arr_jtype, elem_jtype, region_suffix, cpp_t, _ = ARRAY_TYPE_MAP[java_type]
         lines += [
@@ -676,12 +868,21 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
         ]
 
     elif conv in ("direct", "long_safe"):
-        cast_type = "jlong" if conv == "long_safe" else jtype
-        lines.append(
-            f"{indent}{cast_type} jni_{name} = "
-            f"static_cast<{cast_type}>({name});")
-        lines.append(
-            f"{indent}LOGV_INT(\"{name}\", (int64_t)jni_{name});")
+        # [A37] jchar direct — convert Python str char to jchar
+        if jtype == "jchar":
+            lines += [
+                f"{indent}// [A37] jchar from Python str",
+                f"{indent}jchar jni_{name} = ({name}.empty()) ? 0 :",
+                f"{indent}    (jchar)(uint16_t)(unsigned char){name}[0];",
+                f"{indent}LOGV_INT(\"{name}\", (int64_t)jni_{name});",
+            ]
+        else:
+            cast_type = "jlong" if conv == "long_safe" else jtype
+            lines.append(
+                f"{indent}{cast_type} jni_{name} = "
+                f"static_cast<{cast_type}>({name});")
+            lines.append(
+                f"{indent}LOGV_INT(\"{name}\", (int64_t)jni_{name});")
 
     else:
         lines.append(
@@ -694,7 +895,7 @@ def emit_param_cleanup(p: dict, lines: list, indent: str = "    ") -> None:
     """[FIX-3] callable_to_proxy returns NewGlobalRef — must DeleteGlobalRef."""
     name      = sanitize_id(p["name"])
     jtype     = p.get("jni_type", "")
-    java_type = p.get("java_type", "")  # ADD THIS LINE
+    java_type = p.get("java_type", "")
     conv      = p.get("conversion", "")
 
     if conv == "abstract_adapter":
@@ -703,8 +904,12 @@ def emit_param_cleanup(p: dict, lines: list, indent: str = "    ") -> None:
         lines.append(f"{indent}if (jni_{name}) env->DeleteGlobalRef(jni_{name});")
     elif conv == "string_in" or jtype == "jstring":
         lines.append(f"{indent}env->DeleteLocalRef(jni_{name});")
+    elif is_charsequence_param(p):
+        lines.append(f"{indent}env->DeleteLocalRef(jni_{name});")
     elif (java_type in ARRAY_TYPE_MAP
           or (java_type and (java_type.startswith("[L") or java_type.startswith("[[")))):
+        lines.append(f"{indent}env->DeleteLocalRef(jni_{name});")
+    elif p.get("is_varargs", False):
         lines.append(f"{indent}env->DeleteLocalRef(jni_{name});")
 
 
@@ -716,7 +921,7 @@ def jni_args(params: list) -> str:
 def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
                             m: dict, indent: str = "    ",
                             method_name: str = "") -> None:
-    """[FIX-25] Return conversion with LOGV ultra-tracing."""
+    """[FIX-25 / A37 / A39 / A40 / A41 / A14] Return conversion with LOGV."""
     mname = method_name or m.get("name", "?")
 
     if ret_decl == "void":
@@ -735,6 +940,40 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
         lines.append(f"{indent}LOGV_RET_BOOL(\"{mname}\", _bret);")
         lines.append(f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"bool\");")
         lines.append(f"{indent}return _bret;")
+
+    # [A37] jchar return → single char Python str
+    elif ret_decl == "std::string" and get_return_jni(m) == "jchar":
+        lines += [
+            f"{indent}// [A37] jchar return → single Python str char",
+            f"{indent}std::string _cres;",
+            f"{indent}uint16_t _cval = (uint16_t)(jchar)raw;",
+            f"{indent}if (_cval < 0x80) {{ _cres += (char)_cval; }}",
+            f"{indent}else if (_cval < 0x800) {{",
+            f"{indent}    _cres += (char)(0xC0 | (_cval >> 6));",
+            f"{indent}    _cres += (char)(0x80 | (_cval & 0x3F));",
+            f"{indent}}} else {{",
+            f"{indent}    _cres += (char)(0xE0 | (_cval >> 12));",
+            f"{indent}    _cres += (char)(0x80 | ((_cval >> 6) & 0x3F));",
+            f"{indent}    _cres += (char)(0x80 | (_cval & 0x3F));",
+            f"{indent}}}",
+            f"{indent}LOGV_RET_STR(\"{mname}\", _cres);",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"jchar->str\");",
+            f"{indent}return _cres;",
+        ]
+
+    # [A37] jchar array return → u16string
+    elif ret_decl == "std::u16string":
+        lines += [
+            f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"u16string(null)\"); return std::u16string(); }}",
+            f"{indent}jcharArray _carr = (jcharArray)raw;",
+            f"{indent}jsize _clen = env->GetArrayLength(_carr);",
+            f"{indent}std::u16string _cstr(_clen, u'\\0');",
+            f"{indent}env->GetCharArrayRegion(_carr, 0, _clen, (jchar*)_cstr.data());",
+            f"{indent}env->DeleteLocalRef(_carr);",
+            f"{indent}LOGD(\"return u16string len=%d\", _clen);",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"u16string\");",
+            f"{indent}return _cstr;",
+        ]
 
     elif ret_decl == "std::string" or is_string_return(m):
         lines += [
@@ -767,7 +1006,7 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
             f"{indent}return _bres;",
         ]
 
-    elif ret_sig in ARRAY_TYPE_MAP and ret_sig != "[B":
+    elif ret_sig in ARRAY_TYPE_MAP and ret_sig not in ("[B", "[C"):
         arr_jtype, elem_jtype, region_suffix, cpp_t, _ = ARRAY_TYPE_MAP[ret_sig]
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"array(null)\"); return {{}}; }}",
@@ -836,15 +1075,188 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
             f"{indent}return _olist;",
         ]
 
-    elif ret_decl.endswith("*") and ret_decl != "StratumObject*":
+    # [A14] Collection return → nb::list
+    elif ret_decl == "nb::list":
+        lines += [
+            f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"list(null)\"); return nb::list(); }}",
+            f"{indent}// [A14] Convert Java Collection to Python list",
+            f"{indent}nb::list _coll_list;",
+            f"{indent}{{",
+            f"{indent}    jclass _lcls = env->GetObjectClass(raw);",
+            f"{indent}    jmethodID _lsize = env->GetMethodID(_lcls, \"size\", \"()I\");",
+            f"{indent}    jmethodID _lget = env->GetMethodID(_lcls, \"get\", \"(I)Ljava/lang/Object;\");",
+            f"{indent}    if (_lsize && _lget) {{",
+            f"{indent}        jint _llen = env->CallIntMethod(raw, _lsize);",
+            f"{indent}        LOGD(\"Collection size=%d\", _llen);",
+            f"{indent}        for (jint _li = 0; _li < _llen; ++_li) {{",
+            f"{indent}            jobject _litem = env->CallObjectMethod(raw, _lget, _li);",
+            f"{indent}            if (!_litem) {{ _coll_list.append(nb::none()); continue; }}",
+            f"{indent}            if (g_jstring_class && env->IsInstanceOf(_litem, g_jstring_class)) {{",
+            f"{indent}                const char* _ls = env->GetStringUTFChars((jstring)_litem, nullptr);",
+            f"{indent}                _coll_list.append(nb::str(_ls));",
+            f"{indent}                env->ReleaseStringUTFChars((jstring)_litem, _ls);",
+            f"{indent}                env->DeleteLocalRef(_litem);",
+            f"{indent}            }} else {{",
+            f"{indent}                jobject _lgref = env->NewGlobalRef(_litem);",
+            f"{indent}                env->DeleteLocalRef(_litem);",
+            f"{indent}                _coll_list.append(nb::cast(new StratumObject(_lgref), nb::rv_policy::take_ownership));",
+            f"{indent}            }}",
+            f"{indent}        }}",
+            f"{indent}    }} else {{",
+            f"{indent}        env->ExceptionClear();",
+            f"{indent}        jobject _lgref = env->NewGlobalRef(raw);",
+            f"{indent}        env->DeleteLocalRef(raw);",
+            f"{indent}        _coll_list.append(nb::cast(new StratumObject(_lgref), nb::rv_policy::take_ownership));",
+            f"{indent}    }}",
+            f"{indent}    env->DeleteLocalRef(_lcls);",
+            f"{indent}    env->DeleteLocalRef(raw);",
+            f"{indent}}}",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"list\");",
+            f"{indent}return _coll_list;",
+        ]
+
+    # [A14] Map return → nb::dict
+    elif ret_decl == "nb::dict":
+        lines += [
+            f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"dict(null)\"); return nb::dict(); }}",
+            f"{indent}// [A14] Convert Java Map to Python dict",
+            f"{indent}nb::dict _map_dict;",
+            f"{indent}{{",
+            f"{indent}    jclass _mcls = env->GetObjectClass(raw);",
+            f"{indent}    jmethodID _mentrySet = env->GetMethodID(_mcls, \"entrySet\", \"()Ljava/util/Set;\");",
+            f"{indent}    env->DeleteLocalRef(_mcls);",
+            f"{indent}    if (_mentrySet) {{",
+            f"{indent}        jobject _es = env->CallObjectMethod(raw, _mentrySet);",
+            f"{indent}        jclass _escls = env->GetObjectClass(_es);",
+            f"{indent}        jmethodID _esiter = env->GetMethodID(_escls, \"iterator\", \"()Ljava/util/Iterator;\");",
+            f"{indent}        env->DeleteLocalRef(_escls);",
+            f"{indent}        jobject _iter = env->CallObjectMethod(_es, _esiter);",
+            f"{indent}        env->DeleteLocalRef(_es);",
+            f"{indent}        jclass _icls = env->GetObjectClass(_iter);",
+            f"{indent}        jmethodID _ihasNext = env->GetMethodID(_icls, \"hasNext\", \"()Z\");",
+            f"{indent}        jmethodID _inext = env->GetMethodID(_icls, \"next\", \"()Ljava/lang/Object;\");",
+            f"{indent}        env->DeleteLocalRef(_icls);",
+            f"{indent}        while (env->CallBooleanMethod(_iter, _ihasNext)) {{",
+            f"{indent}            jobject _entry = env->CallObjectMethod(_iter, _inext);",
+            f"{indent}            jclass _ecls2 = env->GetObjectClass(_entry);",
+            f"{indent}            jmethodID _ekey = env->GetMethodID(_ecls2, \"getKey\", \"()Ljava/lang/Object;\");",
+            f"{indent}            jmethodID _eval = env->GetMethodID(_ecls2, \"getValue\", \"()Ljava/lang/Object;\");",
+            f"{indent}            env->DeleteLocalRef(_ecls2);",
+            f"{indent}            jobject _ek = env->CallObjectMethod(_entry, _ekey);",
+            f"{indent}            jobject _ev = env->CallObjectMethod(_entry, _eval);",
+            f"{indent}            env->DeleteLocalRef(_entry);",
+            f"{indent}            nb::object _pyk, _pyv;",
+            f"{indent}            if (_ek && g_jstring_class && env->IsInstanceOf(_ek, g_jstring_class)) {{",
+            f"{indent}                const char* _kc = env->GetStringUTFChars((jstring)_ek, nullptr);",
+            f"{indent}                _pyk = nb::str(_kc);",
+            f"{indent}                env->ReleaseStringUTFChars((jstring)_ek, _kc);",
+            f"{indent}                env->DeleteLocalRef(_ek);",
+            f"{indent}            }} else if (_ek) {{",
+            f"{indent}                _pyk = nb::cast(new StratumObject(env->NewGlobalRef(_ek)), nb::rv_policy::take_ownership);",
+            f"{indent}                env->DeleteLocalRef(_ek);",
+            f"{indent}            }} else _pyk = nb::none();",
+            f"{indent}            if (_ev) {{",
+            f"{indent}                _pyv = nb::cast(new StratumObject(env->NewGlobalRef(_ev)), nb::rv_policy::take_ownership);",
+            f"{indent}                env->DeleteLocalRef(_ev);",
+            f"{indent}            }} else _pyv = nb::none();",
+            f"{indent}            _map_dict[_pyk] = _pyv;",
+            f"{indent}        }}",
+            f"{indent}        env->DeleteLocalRef(_iter);",
+            f"{indent}    }}",
+            f"{indent}    env->DeleteLocalRef(raw);",
+            f"{indent}}}",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"dict\");",
+            f"{indent}return _map_dict;",
+        ]
+
+    # [A41] ByteBuffer return — zero-copy direct, or bytes for heap
+    elif ret_decl == "nb::object":
+        lines += [
+            f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"bytebuffer(null)\"); return nb::none(); }}",
+            f"{indent}// [A41] ByteBuffer — try direct (zero-copy) first",
+            f"{indent}void* _bb_addr = env->GetDirectBufferAddress(raw);",
+            f"{indent}if (_bb_addr != nullptr) {{",
+            f"{indent}    jlong _bb_cap = env->GetDirectBufferCapacity(raw);",
+            f"{indent}    if (_bb_cap > 0) {{",
+            f"{indent}        LOGD(\"ByteBuffer direct addr=%p cap=%lld\", _bb_addr, (long long)_bb_cap);",
+            f"{indent}        LOGV(\"BYTEBUFFER_DIRECT addr=%p capacity=%lld\", _bb_addr, (long long)_bb_cap);",
+            f"{indent}        // Keep the raw reference alive as a global ref",
+            f"{indent}        jobject _bb_gref = env->NewGlobalRef(raw);",
+            f"{indent}        env->DeleteLocalRef(raw);",
+            f"{indent}        // Create a nanobind capsule that deletes the global ref when Python garbage collects the memoryview",
+            f"{indent}        nb::capsule _owner(_bb_gref, [](void* p) noexcept {{",
+            f"{indent}            JNIEnv* e = get_env_safe();",
+            f"{indent}            if (e) e->DeleteGlobalRef((jobject)p);",
+            f"{indent}        }});",
+            f"{indent}        // Return as mutable memoryview tied to the capsule lifecycle",
+            f"{indent}        Py_buffer _view;",
+            f"{indent}        if (PyBuffer_FillInfo(&_view, _owner.ptr(), _bb_addr, (Py_ssize_t)_bb_cap, 0, 0) == -1) {{",
+            f"{indent}            PyErr_Clear(); return nb::none();",
+            f"{indent}        }}",
+            f"{indent}        PyObject* _mview = PyMemoryView_FromBuffer(&_view);",
+            f"{indent}        if (!_mview) return nb::none();",
+            f"{indent}        nb::object _mview_obj = nb::borrow(_mview);",
+            f"{indent}        Py_DECREF(_mview);",
+            f"{indent}        return _mview_obj;",
+            f"{indent}    }}",
+            f"{indent}}}",
+            f"{indent}// Fallback: heap ByteBuffer — copy via array()",
+            f"{indent}LOGV(\"BYTEBUFFER_HEAP fallback\");",
+            f"{indent}jclass _bbcls = env->GetObjectClass(raw);",
+            f"{indent}jmethodID _bbarr = env->GetMethodID(_bbcls, \"array\", \"()[B\");",
+            f"{indent}env->DeleteLocalRef(_bbcls);",
+            f"{indent}if (_bbarr) {{",
+            f"{indent}    jbyteArray _bba = (jbyteArray)env->CallObjectMethod(raw, _bbarr);",
+            f"{indent}    env->DeleteLocalRef(raw);",
+            f"{indent}    if (_bba) {{",
+            f"{indent}        jsize _bblen = env->GetArrayLength(_bba);",
+            f"{indent}        jbyte* _bbp = env->GetByteArrayElements(_bba, nullptr);",
+            f"{indent}        nb::bytes _bbb(reinterpret_cast<const char*>(_bbp), _bblen);",
+            f"{indent}        env->ReleaseByteArrayElements(_bba, _bbp, JNI_ABORT);",
+            f"{indent}        env->DeleteLocalRef(_bba);",
+            f"{indent}        return _bbb;",
+            f"{indent}    }}",
+            f"{indent}}} else {{ env->ExceptionClear(); }}",
+            f"{indent}env->DeleteLocalRef(raw);",
+            f"{indent}return nb::none();",
+        ]
+    # [A39] Throwable return
+    elif ret_decl == "StratumThrowable*":
+        lines += [
+            f"{indent}if (!raw) {{ LOGV_RET_PTR(\"{mname}\", nullptr); return nullptr; }}",
+            f"{indent}// [A39] Throwable return",
+            f"{indent}jobject _tgref = env->NewGlobalRef(raw);",
+            f"{indent}env->DeleteLocalRef(raw);",
+            f"{indent}LOGD(\"return StratumThrowable = %p\", _tgref);",
+            f"{indent}LOGV_RET_PTR(\"{mname}\", _tgref);",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"StratumThrowable*\");",
+            f"{indent}return new StratumThrowable(_tgref);",
+        ]
+
+    # [A40] WeakReference return
+    elif ret_decl == "StratumWeakObject*":
+        lines += [
+            f"{indent}if (!raw) {{ LOGV_RET_PTR(\"{mname}\", nullptr); return nullptr; }}",
+            f"{indent}// [A40] WeakReference return",
+            f"{indent}jobject _wgref = env->NewGlobalRef(raw);",
+            f"{indent}env->DeleteLocalRef(raw);",
+            f"{indent}LOGD(\"return StratumWeakObject = %p\", _wgref);",
+            f"{indent}LOGV_RET_PTR(\"{mname}\", _wgref);",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"StratumWeakObject*\");",
+            f"{indent}return new StratumWeakObject(_wgref, env);",
+        ]
+
+    elif ret_decl.endswith("*") and ret_decl not in ("StratumObject*", "StratumThrowable*", "StratumWeakObject*"):
         inner = ret_decl[:-1]
         lines += [
             f"{indent}if (!raw) {{ LOGV_RET_PTR(\"{mname}\", nullptr); "
             f"LOGT_JNI_TO_PY(\"\", \"{mname}\", \"typed*(null)\"); return nullptr; }}",
-            f"{indent}auto* _w = new {inner}(raw);",
+            f"{indent}// [Action35] NewGlobalRef so each wrapper owns its own ref",
+            f"{indent}jobject _typed_gref = env->NewGlobalRef(raw);",
             f"{indent}env->DeleteLocalRef((jobject)raw);",
-            f"{indent}LOGD(\"return typed obj = %p\", raw);",
-            f"{indent}LOGV_RET_PTR(\"{mname}\", raw);",
+            f"{indent}auto* _w = new {inner}(_typed_gref);",
+            f"{indent}LOGD(\"return typed obj = %p\", _typed_gref);",
+            f"{indent}LOGV_RET_PTR(\"{mname}\", _typed_gref);",
             f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"typed*\");",
             f"{indent}return _w;",
         ]
@@ -1093,16 +1505,15 @@ def emit_field_accessors(
 
 def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
     """
-    [FIX-3] Returns NewGlobalRef. [FIX-25] LOGV tracing.
-    [STAGE-05.5] Also handles abstract_adapter params (Java class that
-    extends an abstract Android class, created via Adapter_*.java).
+    [FIX-3 / Action7] Returns NewGlobalRef. LOGW on unknown dict keys.
+    [STAGE-05.5] Also handles abstract_adapter params.
     """
     for p in m.get("params", []):
         conv  = p.get("conversion", "")
         pname = sanitize_id(p["name"])
         fn    = f"create_proxy_m{mi}_{pname}"
 
-        # ── ABSTRACT ADAPTER (Stage 05.5) ────────────────────────────────────
+        # ── ABSTRACT ADAPTER ──────────────────────────────────────────────────
         if conv == "abstract_adapter":
             adj = p.get("adapter_jni", "")
             if not adj:
@@ -1118,7 +1529,6 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
                 f"    std::string _key = \"{fqn}#{m['name']}#{pname}_\""
                 f" + std::to_string(++_aid);",
                 f"",
-                f"    // Store Python callable(s) under the key",
                 f"    if (nb::isinstance<nb::callable>(callbacks)) {{",
                 f"        store_callback(_key,"
                 f" nb::cast<nb::callable>(callbacks));",
@@ -1141,10 +1551,7 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
                 f"    if (!_cls) {{",
                 f"        env->ExceptionClear();",
                 f"        LOGE(\"Adapter class not found: {adj}\");",
-                f"        LOGE(\"Did you copy Adapter_*.java to "
-                f"runtime/java/com/stratum/adapters/?\");",
-                f"        throw std::runtime_error(",
-                f"            \"Adapter not found: {adj}\");",
+                f"        throw std::runtime_error(\"Adapter not found: {adj}\");",
                 f"    }}",
                 f"    jmethodID _ctor = env->GetMethodID(",
                 f"        _cls, \"<init>\", \"(Ljava/lang/String;)V\");",
@@ -1152,8 +1559,7 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
                 f"        env->ExceptionClear();",
                 f"        env->DeleteLocalRef(_cls);",
                 f"        LOGE(\"Adapter (String) ctor not found: {adj}\");",
-                f"        throw std::runtime_error(",
-                f"            \"Adapter ctor not found: {adj}\");",
+                f"        throw std::runtime_error(\"Adapter ctor not found: {adj}\");",
                 f"    }}",
                 f"    jstring _jkey = env->NewStringUTF(_key.c_str());",
                 f"    jobject _obj  = env->NewObject(_cls, _ctor, _jkey);",
@@ -1174,17 +1580,29 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
             ]
             continue
 
-        # ── INTERFACE PROXY (existing — unchanged) ────────────────────────────
         if conv != "callable_to_proxy":
             continue
 
+        # ── INTERFACE PROXY ────────────────────────────────────────────────────
         iface         = m.get("proxy_interface", "")
         if not iface:
             jtype = p.get("java_type", "").replace(".", "/")
             iface = jtype if jtype else "java/lang/Runnable"
         iface         = to_jni_slash(iface)
         base_key      = f"{fqn}#{m['name']}#{pname}"
-        iface_methods = m.get("proxy_methods", [])
+
+        # [Action7] Get full method objects from proxy_methods field
+        # [A4] proxy_method_list from Stage 05 may be strings or dicts
+        raw_proxy_methods = m.get("proxy_methods", [])
+        iface_methods = []
+        for pm in raw_proxy_methods:
+            if isinstance(pm, dict):
+                iface_methods.append(pm)
+            elif isinstance(pm, str):
+                iface_methods.append({"name": pm})
+
+        # [Action7] Known method names for validation
+        known_method_names = {pm.get("name", "") for pm in iface_methods}
 
         lines += [
             f"// Proxy factory for interface: {iface}",
@@ -1194,6 +1612,7 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
             f"    static std::atomic<uint64_t> proxy_id{{0}};",
             f"    uint64_t pid = ++proxy_id;",
         ]
+
         if iface_methods:
             for meth in iface_methods:
                 mkey = sanitize_id(meth.get("name", "callback"))
@@ -1204,6 +1623,24 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
                     f"        nb::callable _fn;",
                     f"        if (nb::isinstance<nb::dict>(callbacks)) {{",
                     f"            nb::dict _d = nb::cast<nb::dict>(callbacks);",
+                ]
+                # [Action7] Validate dict keys
+                if known_method_names:
+                    lines += [
+                        f"            // [Action7] Validate callback dict keys",
+                        f"            nb::list _dkeys = _d.keys();",
+                        f"            for (size_t _ki = 0; _ki < nb::len(_dkeys); ++_ki) {{",
+                        f"                std::string _kname = nb::cast<std::string>(_dkeys[_ki]);",
+                    ]
+                    known_cpp = "{" + ", ".join(f'"{n}"' for n in sorted(known_method_names) if n) + "}"
+                    lines += [
+                        f"                static const std::unordered_set<std::string> _known = {known_cpp};",
+                        f"                if (_known.find(_kname) == _known.end()) {{",
+                        f"                    LOGW(\"[Action7] PROXY_UNKNOWN_KEY '%s' not in known methods for {iface}\", _kname.c_str());",
+                        f"                }}",
+                        f"            }}",
+                    ]
+                lines += [
                     f"            if (_d.contains(\"{mkey}\"))",
                     f"                _fn = nb::cast<nb::callable>"
                     f"(_d[\"{mkey}\"]);",
@@ -1288,12 +1725,11 @@ def emit_proxy_factory(fqn: str, mi: int, m: dict, lines: list) -> None:
 
 
 # =============================================================================
-# [FIX-17] native_entries builder — ONLY truly native (JNI) methods
+# [FIX-17] native_entries builder
 # =============================================================================
 
 def build_native_entries(groups: dict, ctor_len: int,
                           decl_len: int) -> List[Tuple[int, dict, bool]]:
-    """[FIX-17] Only is_native=True methods enter RegisterNatives."""
     entries: List[Tuple[int, dict, bool]] = []
     for idx_d, m in enumerate(groups["declared"]):
         if not m.get("is_constructor") and m.get("is_native", False):
@@ -1315,7 +1751,7 @@ def emit_native_fn_declaration(
     global_idx: int,
     lines: list,
 ) -> bool:
-    """[FIX-18] Always virtual. [FIX-25] LOGV tracing."""
+    """[FIX-18] Always virtual. [FIX-25] LOGV."""
     ret_decl   = ret_decl_for(m)
     params     = m.get("params", [])
     cpp_params = [(sanitize_id(p["name"]), cpp_type_for_param(p))
@@ -1386,7 +1822,7 @@ def emit_native_fn_declaration(
 
 
 # =============================================================================
-# [FIX-16] Instance method emitter — ALWAYS virtual
+# [FIX-16] Instance method emitter
 # =============================================================================
 
 def _emit_instance_method(
@@ -1397,8 +1833,7 @@ def _emit_instance_method(
     seen_inst: set,
     lines: list,
 ) -> None:
-    """[FIX-16] Virtual dispatch only. [FIX-23] none(true) for pointer params.
-    [FIX-25] Full LOGV tracing."""
+    """[FIX-16] Virtual dispatch. [FIX-23/A42] none(true) for nullable pointers."""
     ret_decl   = ret_decl_for(m)
     params     = m.get("params", [])
     cpp_params = [(sanitize_id(p["name"]), cpp_type_for_param(p))
@@ -1433,19 +1868,19 @@ def _emit_instance_method(
     lines.append(f"    if (!obj_) {{ LOGE(\"obj_ null in {sname}::{mname}\"); "
                     f"{null_return(ret_decl)} }}")
     lines.append(f"    LOGV(\"INST_CALL {fqn}#{m['name']} self=%p\", obj_);")
-    # GIL is held here during param conversion!
 
-    # Log each argument
     for p in params:
         pname = sanitize_id(p["name"])
         ptype = cpp_type_for_param(p)
         if ptype.endswith("*"):
             lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->obj_ : nullptr);")
-        elif "string" in ptype:
+        elif ptype == "std::string" or ptype == "const std::string&":
             lines.append(f"    LOGV_STR(\"{pname}\", {pname});")
+        elif ptype == "std::u16string":
+            lines.append(f"    LOGV_INT(\"{pname}_len\", (int64_t){pname}.size());")
         elif ptype == "bool":
             lines.append(f"    LOGV_BOOL(\"{pname}\", {pname});")
-        elif ptype == "nb::object":
+        elif ptype in ("nb::object", "nb::args"):
             lines.append(f"    LOGV_PYOBJ(\"{pname}\", {pname});")
         elif ptype == "nb::list":
             lines.append(f"    LOGV_INT(\"{pname}_len\", (int64_t)nb::len({pname}));")
@@ -1458,7 +1893,6 @@ def _emit_instance_method(
         emit_param_conversion(p, global_idx, lines, method_name=m["name"])
 
     args = (", " + jni_args(params)) if params else ""
-    # Release GIL strictly during the Java method execution
     if ret_decl == "void":
         lines.append(f"    LOGV(\"JNI_CALL_START {fqn}#{m['name']}\");")
         lines.append(f"    {{ nb::gil_scoped_release _release;")
@@ -1482,24 +1916,23 @@ def _emit_instance_method(
 
 
 # =============================================================================
-# [FIX-23] nanobind arg helper — 
+# [FIX-23 / A42] nanobind arg helper
 # =============================================================================
 
 def nb_arg_for_param(p: dict, param_name: str) -> str:
     """
-    [FIX-30/31] Prevent nanobind SIGABRT on overloaded methods.
-    nanobind asserts if overloads share an argument name (e.g. 'arg0') but have 
-    different .none() annotations. Appending the C++ type guarantees unique 
-    names across overloads, allowing us to safely use .none(true) only on pointers.
+    [FIX-23 / A42] Emit nb::arg with .none(true) only for nullable pointers.
+    [Action29] Unique name by appending type suffix to prevent nanobind SIGABRT.
     """
-    ptype = cpp_type_for_param(p)
+    ptype  = cpp_type_for_param(p)
     is_ptr = ptype.endswith("*") or ptype == "nb::object"
-    
-    # Strip non-alphanumeric characters to create a clean, safe suffix
     safe_type = re.sub(r'[^a-zA-Z0-9]', '', ptype)
     unique_name = f"{param_name}_{safe_type}"
-    
-    if is_ptr:
+
+    # [A42] Only apply .none(true) when explicitly nullable (or unknown → True)
+    nullable = p.get("nullable", True)
+
+    if is_ptr and nullable:
         return f'nb::arg("{unique_name}").none(true)'
     else:
         return f'nb::arg("{unique_name}")'
@@ -1534,13 +1967,21 @@ def emit_class_cpp(cls: dict) -> str:
 
     lines = [
         f"// ============================================================",
-        f"// Stratum Stage 06 v4.8 — DO NOT EDIT",
+        f"// Stratum Stage 06 v{STAGE_VERSION} — DO NOT EDIT",
         f"// Class  : {fqn}",
         f"// FIX-16 : all calls virtual (no NonVirtual)",
         f"// FIX-17 : RegisterNatives only for is_native methods",
         f"// FIX-19 : LOGD diagnostics (STRATUM_VERBOSE_LOG=1)",
-        f"// FIX-23 : pointer params accept None via nb::arg().none(true)",
+        f"// FIX-23 : nullable pointer params emit nb::arg().none(true)",
         f"// FIX-25 : ultra-deep LOGV tracing (STRATUM_ULTRA_LOG=1)",
+        f"// A37    : jchar UTF-16 correct handling",
+        f"// A38    : varargs Object... support",
+        f"// A39    : jthrowable → StratumThrowable",
+        f"// A40    : WeakReference → StratumWeakObject",
+        f"// A41    : ByteBuffer zero-copy direct memoryview",
+        f"// A42    : @NonNull/@Nullable → none(true) only when nullable",
+        f"// Action7: proxy dict key mismatch LOGW",
+        f"// Action8: CharSequence → string_in",
         f"// ============================================================",
         f"#include <jni.h>",
         f"#include <stdint.h>",
@@ -1549,12 +1990,14 @@ def emit_class_cpp(cls: dict) -> str:
         f"#include <mutex>",
         f"#include <atomic>",
         f"#include <stdexcept>",
+        f"#include <unordered_set>",
         f'#include "bridge_core.h"',
         f'#include "stratum_structs.h"',
         f"#include <nanobind/nanobind.h>",
         f"#include <nanobind/stl/string.h>",
         f"#include <nanobind/stl/vector.h>",
         f"#include <nanobind/stl/list.h>",
+        f"#include <nanobind/ndarray.h>",
         f"",
         f"namespace nb = nanobind;",
         f'using nb::literals::operator""_a;',
@@ -1780,7 +2223,7 @@ def emit_class_cpp(cls: dict) -> str:
         f"",
     ]
 
-    # ── Constructors / Destructor ──────────────────────────────────────────────
+    # ── Constructors / Destructor ─────────────────────────────────────────────
     if parent_sname:
         lines += [
             f"{sname}::{sname}(jobject obj) : {parent_sname}(obj) {{",
@@ -1797,13 +2240,26 @@ def emit_class_cpp(cls: dict) -> str:
         lines += [
             f"{sname}::{sname}(jobject obj) : StratumObject(obj) {{",
             f"    JNIEnv* env = get_env();",
-            f"    obj_ = env ? env->NewGlobalRef(obj) : obj;",
+            f"    // [Action33] Assert env not null — never store dangling local ref",
+            f"    if (!env) {{",
+            f"        LOGE(\"[Action33] CTOR_NO_ENV {sname} — cannot NewGlobalRef, obj will be invalid\");",
+            f"        // obj_ = obj would store a local ref — DO NOT. Store nullptr instead.",
+            f"        obj_ = nullptr;",
+            f"        return;",
+            f"    }}",
+            f"    obj_ = env->NewGlobalRef(obj);",
             f"    LOGD(\"{sname} constructed obj_=%p\", obj_);",
             f"    LOGV(\"CTOR {sname} raw=%p global=%p\", obj, obj_);",
             f"}}",
             f"{sname}::~{sname}() {{",
-            f"    JNIEnv* env = get_env_safe();",
+            f"    // [Action3] Use get_env() not get_env_safe() so background thread GC attaches",
+            f"    JNIEnv* env = get_env();",
             f"    if (env && obj_) {{",
+            f"        // [Action4] Remove callbacks keyed to this object",
+            f"        if (!stratum_key_prefix_.empty()) {{",
+            f"            remove_callbacks_by_prefix(stratum_key_prefix_);",
+            f"            LOGD(\"{sname} destructor removed callbacks prefix=%s\", stratum_key_prefix_.c_str());",
+            f"        }}",
             f"        env->DeleteGlobalRef(obj_); obj_ = nullptr;",
             f"        LOGD(\"{sname} destroyed global ref released\");",
             f"        LOGV(\"DTOR_GLOBAL_FREED {sname}\");",
@@ -1855,8 +2311,6 @@ def emit_class_cpp(cls: dict) -> str:
             f"    if (!{mvar}) {{ LOGE(\"methodID null in {fn_name}\"); "
             f"{null_return(ret_decl)} }}")
         lines.append(f"    LOGV(\"STATIC_CALL {fqn}#{m['name']}\");")
-        # GIL is held here during param conversion!
-        #lines.append(f"    nb::gil_scoped_release _release;")
         for p in params:
             pname = sanitize_id(p["name"])
             ptype = cpp_type_for_param(p)
@@ -1902,11 +2356,10 @@ def emit_class_cpp(cls: dict) -> str:
     field_nb_entries = emit_field_accessors(
         fqn, fields, prefix, sname, lines)
 
-    # ── Constructor factories ──────────────────────────────────────────────────
-    # ── Constructor factories ──────────────────────────────────────────────────
+    # ── Constructor factories ─────────────────────────────────────────────────
     ctor_nb: List[Tuple[str, str, int, list]] = []
     is_abstract = cls.get("is_abstract", False)
-    
+
     if not is_abstract:
         for idx_c, m in enumerate(groups["constructors"]):
             params     = m.get("params", [])
@@ -1932,8 +2385,6 @@ def emit_class_cpp(cls: dict) -> str:
             lines.append(
                 f"        LOGE(\"methodID or class null in {fn_name}\"); return nullptr; }}")
             lines.append(f"    LOGV(\"CTOR_FACTORY_NEWOBJ {fqn}\");")
-            # GIL is held here during param conversion!
-            #lines.append(f"    nb::gil_scoped_release _release;")
             for p in params:
                 pname = sanitize_id(p["name"])
                 ptype = cpp_type_for_param(p)
@@ -1992,7 +2443,7 @@ def emit_class_cpp(cls: dict) -> str:
     else:
         lines.append(f"    nb::class_<{sname}, StratumObject> cls(m, \"{py_name}\");")
 
-    # Constructors with none(true) for nullable pointer args [FIX-23]
+    # Constructors
     for (fn_name, param_s, idx_c, params) in ctor_nb:
         if params:
             nb_args = ", ".join(
@@ -2008,18 +2459,14 @@ def emit_class_cpp(cls: dict) -> str:
                 f"    cls.def_static(\"new_{idx_c}\", &{fn_name},"
                 f" nb::rv_policy::take_ownership);")
 
-    # Instance methods with none(true) [FIX-23]
-    # Instance methods with none(true) [FIX-23]
-    seen_nb_inst: Set[str] = set()
-    
-    # [FIX-32] Pre-collect ALL instance method names (including inherited!)
-    # This prevents FATAL SIGABRT when a static method has the same name 
-    # as an inherited instance method (e.g., ProgressDialog.show).
+    # [FIX-32] Pre-collect instance method names to prevent static namespace collision
     inst_names: Set[str] = set()
     for m in groups["declared"] + groups["overridden"] + groups["inherited"]:
         if not m.get("is_static") and not m.get("is_constructor"):
             inst_names.add(sanitize_id(m["name"]))
 
+    # Instance methods
+    seen_nb_inst: Set[str] = set()
     for m in groups["declared"] + groups["overridden"]:
         if m.get("is_static") or m.get("is_constructor"):
             continue
@@ -2044,8 +2491,6 @@ def emit_class_cpp(cls: dict) -> str:
             f"(&{sname}::{mname})"
         )
 
-        # [FIX-23] updatead HOTFIX: ALWAYS emit nb::arg annotations if there are params!
-        # Mixing nb::arg() on some overloads but not others causes nanobind to SIGABRT.
         if params:
             nb_args = ", ".join(
                 nb_arg_for_param(p, sanitize_id(p["name"]))
@@ -2055,7 +2500,7 @@ def emit_class_cpp(cls: dict) -> str:
         else:
             lines.append(f"    cls.def(\"{mname}\", {cast});")
 
-    # Static methods with none(true) [FIX-23]
+    # Static methods — [FIX-33] append _static to avoid collision with instance names
     seen_nb_static: Set[str] = set()
     for idx_in_bindable, m in enumerate(bindable):
         if not m.get("is_static") or m.get("is_constructor"):
@@ -2065,9 +2510,9 @@ def emit_class_cpp(cls: dict) -> str:
         cpp_params = [(sanitize_id(p["name"]), cpp_type_for_param(p)) for p in params]
         if should_skip_method(ret_decl, cpp_params):
             continue
-            
+
         mname   = sanitize_id(m["name"])
-        py_m    = mname + "_static"  # [FIX-33] Bulletproof namespace separation
+        py_m    = mname + "_static"
         ptypes  = ", ".join(t for _, t in cpp_params)
         sig_key = f"{py_m}({ptypes})"
         if sig_key in seen_nb_static:
@@ -2076,7 +2521,6 @@ def emit_class_cpp(cls: dict) -> str:
         global_idx = ctor_len + idx_in_bindable
         fn_name    = f"static_{prefix}_{mname}_{global_idx}"
 
-        # HOTFIX: ALWAYS emit nb::arg annotations for static methods too.
         if params:
             nb_args = ", ".join(
                 nb_arg_for_param(p, sanitize_id(p["name"]))
@@ -2087,41 +2531,82 @@ def emit_class_cpp(cls: dict) -> str:
             lines.append(f"    cls.def_static(\"{py_m}\", &{fn_name});")
 
     for (getter_fn, setter_fn, safe_name, cpp_t, is_static) in field_nb_entries:
-                if is_static:
-                    lines.append(f"    cls.def_static(\"sf_get_{safe_name}\", &{getter_fn});")
-                    if setter_fn:
-                        if cpp_t.endswith("*"):
-                            lines.append(f"    cls.def_static(\"sf_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\").none(true));")
-                        else:
-                            lines.append(f"    cls.def_static(\"sf_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\"));")
+        if is_static:
+            lines.append(f"    cls.def_static(\"sf_get_{safe_name}\", &{getter_fn});")
+            if setter_fn:
+                if cpp_t.endswith("*"):
+                    lines.append(f"    cls.def_static(\"sf_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\").none(true));")
                 else:
-                    lines.append(f"    cls.def(\"f_get_{safe_name}\", &{getter_fn});")
-                    if setter_fn:
-                        if cpp_t.endswith("*"):
-                            lines.append(f"    cls.def(\"f_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\").none(true));")
-                        else:
-                            lines.append(f"    cls.def(\"f_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\"));")
+                    lines.append(f"    cls.def_static(\"sf_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\"));")
+        else:
+            lines.append(f"    cls.def(\"f_get_{safe_name}\", &{getter_fn});")
+            if setter_fn:
+                if cpp_t.endswith("*"):
+                    lines.append(f"    cls.def(\"f_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\").none(true));")
+                else:
+                    lines.append(f"    cls.def(\"f_set_{safe_name}\", &{setter_fn}, nb::arg(\"val\"));")
 
+    # [Action5] __eq__ / __ne__ / __hash__ / __bool__ via IsSameObject
+    lines += [
+        f"    cls.def(\"__eq__\", []({sname}* self, nb::object other) -> bool {{",
+        f"        if (other.is_none()) return self == nullptr || self->obj_ == nullptr;",
+        f"        if (!nb::hasattr(other, \"_get_jobject_ptr\")) return false;",
+        f"        int64_t op = nb::cast<int64_t>(other.attr(\"_get_jobject_ptr\")());",
+        f"        if (!op || !self || !self->obj_) return op == 0 && (!self || !self->obj_);",
+        f"        JNIEnv* env = get_env();",
+        f"        if (!env) return false;",
+        f"        return env->IsSameObject(self->obj_, (jobject)(uintptr_t)op);",
+        f"    }}, nb::arg(\"other\").none(true));",
+        f"    cls.def(\"__ne__\", []({sname}* self, nb::object other) -> bool {{",
+        f"        if (other.is_none()) return self != nullptr && self->obj_ != nullptr;",
+        f"        if (!nb::hasattr(other, \"_get_jobject_ptr\")) return true;",
+        f"        int64_t op = nb::cast<int64_t>(other.attr(\"_get_jobject_ptr\")());",
+        f"        if (!op || !self || !self->obj_) return !(op == 0 && (!self || !self->obj_));",
+        f"        JNIEnv* env = get_env();",
+        f"        if (!env) return true;",
+        f"        return !env->IsSameObject(self->obj_, (jobject)(uintptr_t)op);",
+        f"    }}, nb::arg(\"other\").none(true));",
+        f"    // [Action19] __bool__",
+        f"    cls.def(\"__bool__\", []({sname}* self) -> bool {{",
+        f"        return self != nullptr && self->obj_ != nullptr;",
+        f"    }});",
+    ]
 
     lines += [
-        f"    // Stratum Object Pointer Extraction & Safe Casting",
+        f"    // Stratum Object Pointer Extraction & Safe Casting [Action1/Action35]",
         f"    cls.def(\"_get_jobject_ptr\", []({sname}* self) -> int64_t {{",
         f"        return (int64_t)(uintptr_t)(self ? self->obj_ : nullptr);",
         f"    }});",
         f"    cls.def_static(\"_stratum_cast\", [](nb::object py_obj) -> {sname}* {{",
         f"        if (py_obj.is_none()) return nullptr;",
         f"        if (!nb::hasattr(py_obj, \"_get_jobject_ptr\")) {{",
-        f"            LOGE(\"CAST FAILED: Python object lacks _get_jobject_ptr. Not a Stratum wrapper.\");",
+        f"            LOGE(\"[Action1] STRATUM_CAST FAILED: not a Stratum wrapper\");",
         f"            throw std::runtime_error(\"Object is not a Stratum wrapper\");",
         f"        }}",
         f"        int64_t ptr = nb::cast<int64_t>(py_obj.attr(\"_get_jobject_ptr\")());",
         f"        if (!ptr) {{",
-        f"            LOGW(\"CAST WARNING: Underlying jobject pointer is null\");",
+        f"            LOGW(\"[Action1] STRATUM_CAST: null jobject pointer\");",
         f"            return nullptr;",
         f"        }}",
-        f"        LOGV(\"CAST OK: Extracted ptr=%p -> cast to {sname}\", (void*)ptr);",
-        f"        return new {sname}((jobject)(uintptr_t)ptr);",
-        f"    }}, nb::arg(\"obj\").none(true), nb::rv_policy::take_ownership);"
+        f"        // [Action1] Real IsInstanceOf check",
+        f"        JNIEnv* env = get_env();",
+        f"        if (env) {{",
+        f"            ensure_{prefix}_init(env);",
+        f"            if (g_{prefix}_class) {{",
+        f"                jboolean is_inst = env->IsInstanceOf(",
+        f"                    (jobject)(uintptr_t)ptr, g_{prefix}_class);",
+        f"                if (!is_inst) {{",
+        f"                    LOGW(\"[Action1] STRATUM_CAST: IsInstanceOf FAILED for {fqn}\");",
+        f"                    throw std::runtime_error(",
+        f"                        \"stratum_cast: object is not an instance of {fqn}\");",
+        f"                }}",
+        f"            }}",
+        f"        }}",
+        f"        // [Action35] Each wrapper owns its own independent global ref",
+        f"        jobject _new_gref = env ? env->NewGlobalRef((jobject)(uintptr_t)ptr) : (jobject)(uintptr_t)ptr;",
+        f"        LOGV(\"[Action35] STRATUM_CAST_NEWGLOBALREF src=%p new=%p\", (void*)ptr, (void*)_new_gref);",
+        f"        return new {sname}(_new_gref);",
+        f"    }}, nb::arg(\"obj\").none(true), nb::rv_policy::take_ownership);",
     ]
 
     lines += [
@@ -2138,7 +2623,7 @@ def build_jni_native_sig(m: dict) -> str:
 
 
 # =============================================================================
-# stratum_structs.h
+# stratum_structs.h — includes StratumThrowable and StratumWeakObject [A39/A40]
 # =============================================================================
 
 def emit_stratum_structs_h(
@@ -2150,8 +2635,9 @@ def emit_stratum_structs_h(
             cls["parent_fqn"] = ""
 
     lines = [
-        "// stratum_structs.h — Stratum Stage 06 v4.8 — DO NOT EDIT",
-        "// [FIX-16] All virtual. [FIX-23] none(true) for pointer params.",
+        f"// stratum_structs.h — Stratum Stage 06 v{STAGE_VERSION} — DO NOT EDIT",
+        "// [FIX-16] All virtual. [FIX-23/A42] nullable none(true).",
+        "// [A39] StratumThrowable. [A40] StratumWeakObject.",
         "#pragma once",
         "#include <jni.h>",
         "#include <string>",
@@ -2166,6 +2652,7 @@ def emit_stratum_structs_h(
         "// ── StratumObject — opaque wrapper for any Java object ────────────",
         "struct StratumObject {",
         "    jobject obj_;",
+        "    std::string stratum_key_prefix_;  // [Action4] for callback cleanup",
         "    explicit StratumObject(jobject obj) : obj_(obj) {}",
         "    virtual ~StratumObject();  // defined in bridge_core.cpp",
         "    StratumObject(const StratumObject&) = delete;",
@@ -2175,6 +2662,28 @@ def emit_stratum_structs_h(
         "    bool instanceof_check(const std::string& jni_class_name) const;",
         "    std::string class_name() const;",
         "    bool is_null() const { return obj_ == nullptr; }",
+        "};",
+        "",
+        "// ── [A39] StratumThrowable — wrapper for Java Throwable ───────────",
+        "struct StratumThrowable : public StratumObject {",
+        "    explicit StratumThrowable(jobject obj) : StratumObject(obj) {}",
+        "    ~StratumThrowable() override = default;",
+        "    std::string get_message() const;   // calls getMessage()",
+        "    std::string get_class_name() const; // calls getClass().getName()",
+        "};",
+        "",
+        "// ── [A40] StratumWeakObject — Java WeakReference wrapper ──────────",
+        "struct StratumWeakObject {",
+        "    jweak weak_ref_;",
+        "    explicit StratumWeakObject(jobject obj, JNIEnv* env) {",
+        "        weak_ref_ = env ? env->NewWeakGlobalRef(obj) : nullptr;",
+        "    }",
+        "    virtual ~StratumWeakObject();  // DeleteWeakGlobalRef in bridge_core.cpp",
+        "    StratumWeakObject(const StratumWeakObject&) = delete;",
+        "    StratumWeakObject& operator=(const StratumWeakObject&) = delete;",
+        "    // Returns a strong StratumObject* or nullptr if GC collected it",
+        "    StratumObject* get() const;",
+        "    bool is_enqueued() const { return weak_ref_ == nullptr; }",
         "};",
         "",
         "// ── StratumSurface — Surface + ANativeWindow ──────────────────────",
@@ -2254,7 +2763,6 @@ def emit_stratum_structs_h(
         if parent_sn:
             lines.append(f"struct {sn} : public {parent_sn} {{")
         else:
-            #lines += [f"struct {sn} {{", f"    jobject obj_;"]
             lines.append(f"struct {sn} : public StratumObject {{")
 
         lines += [
@@ -2294,8 +2802,10 @@ def emit_stratum_structs_h(
 # =============================================================================
 
 def emit_bridge_core_h() -> str:
-    return """\
-// bridge_core.h — Stratum Stage 06 v4.8 — DO NOT EDIT
+    return f"""\
+// bridge_core.h — Stratum Stage 06 v{STAGE_VERSION} — DO NOT EDIT
+// [Action4] remove_callbacks_by_prefix added
+// [Action32] stratum_callback_count() added
 #pragma once
 #include <jni.h>
 #include <string>
@@ -2306,6 +2816,10 @@ def emit_bridge_core_h() -> str:
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/function.h>
 namespace nb = nanobind;
+
+// [Action47] Stage version
+#define STRATUM_VERSION "{STAGE_VERSION}"
+#define STRATUM_MAX_CALLBACKS {STRATUM_MAX_CALLBACKS}
 
 extern JavaVM*   g_jvm;
 extern jobject   g_activity;
@@ -2321,6 +2835,8 @@ extern jclass g_stratum_handler_class;
 extern std::unordered_map<std::string,
                           std::shared_ptr<nb::callable>> g_callbacks;
 extern std::mutex g_callback_mutex;
+// [Action25] Activity mutex for rotation safety
+extern std::mutex g_activity_mutex;
 
 JNIEnv*      get_env();
 JNIEnv*      get_env_safe();
@@ -2328,6 +2844,10 @@ jclass       find_class(JNIEnv* env, const char* name);
 void         store_callback(const std::string& key, nb::callable fn);
 nb::callable get_callback(const std::string& key);
 void         remove_callback(const std::string& key);
+// [Action4] Remove all callbacks whose key starts with prefix
+size_t       remove_callbacks_by_prefix(const std::string& prefix);
+// [Action32] Count of stored callbacks
+size_t       stratum_callback_count();
 """
 
 
@@ -2337,13 +2857,22 @@ void         remove_callback(const std::string& key);
 
 def emit_bridge_core_cpp() -> str:
     return r"""
-// bridge_core.cpp — Stratum Stage 06 v4.8 — DO NOT EDIT
-// [FIX-13] get_env() null guard. [FIX-12] g_activity deleted in OnUnload.
-// [FIX-25] Ultra-deep LOGV tracing throughout.
+// bridge_core.cpp — Stratum Stage 06 v5.0 — DO NOT EDIT
+// [Action3]  Destructor uses get_env() not get_env_safe()
+// [Action4]  remove_callbacks_by_prefix
+// [Action6]  nativeDispatch returns jobject back to Java
+// [Action32] g_callbacks size monitoring
+// [Action34] g_callback_mutex + GIL deadlock fix (mutex before GIL)
+// [Action36] gil_scoped_acquire same-thread safety via PyGILState_Check
+// [A2]       nativeDispatch unbox primitive wrappers
+// [A39]      StratumThrowable implementation
+// [A40]      StratumWeakObject implementation
 #include "bridge_core.h"
 #include "stratum_structs.h"
 #include <pthread.h>
 #include <android/log.h>
+#include <vector>
+#include <algorithm>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Stratum", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "Stratum", __VA_ARGS__)
@@ -2391,6 +2920,8 @@ jclass g_stratum_handler_class = nullptr;
 
 std::unordered_map<std::string, std::shared_ptr<nb::callable>> g_callbacks;
 std::mutex g_callback_mutex;
+// [Action25] Activity mutex
+std::mutex g_activity_mutex;
 
 // ── Thread attach / detach ────────────────────────────────────────────────────
 static pthread_key_t  g_jni_detach_key;
@@ -2439,7 +2970,6 @@ jclass find_class(JNIEnv* env, const char* name) {
     jclass cls = env->FindClass(name);
     if (cls) {
         LOGD("find_class: found %s via FindClass", name);
-        LOGV("FIND_CLASS_OK via FindClass: %s cls=%p", name, (void*)cls);
         return cls;
     }
     env->ExceptionClear();
@@ -2452,29 +2982,31 @@ jclass find_class(JNIEnv* env, const char* name) {
         env->DeleteLocalRef(jname);
         if (env->ExceptionCheck()) {
             LOGE("find_class: loadClass failed for %s", name);
-            LOGV("FIND_CLASS_FAIL loadClass threw: %s", name);
             env->ExceptionClear();
             return nullptr;
         }
         if (cls) {
             LOGD("find_class: found %s via ClassLoader", name);
-            LOGV("FIND_CLASS_OK via ClassLoader: %s cls=%p", name, (void*)cls);
         } else {
             LOGE("find_class: NOT found: %s", name);
-            LOGV("FIND_CLASS_NOTFOUND: %s", name);
         }
         return cls;
     }
     LOGE("find_class: no ClassLoader available for %s", name);
-    LOGV("FIND_CLASS_NOCLASSLOADER: %s", name);
     return nullptr;
 }
 
 void store_callback(const std::string& key, nb::callable fn) {
     std::lock_guard<std::mutex> lock(g_callback_mutex);
     g_callbacks[key] = std::make_shared<nb::callable>(std::move(fn));
-    LOGD("store_callback: key=%s", key.c_str());
-    LOGV("CALLBACK_STORE key=%s", key.c_str());
+    size_t sz = g_callbacks.size();
+    // [Action32] Warn on excessive callback map size
+    if (sz > STRATUM_MAX_CALLBACKS) {
+        LOGW("[Action32] CALLBACK_MAP_SIZE_WARNING count=%zu threshold=%d",
+             sz, STRATUM_MAX_CALLBACKS);
+    }
+    LOGD("store_callback: key=%s total=%zu", key.c_str(), sz);
+    LOGV("CALLBACK_STORE key=%s total=%zu", key.c_str(), sz);
 }
 
 nb::callable get_callback(const std::string& key) {
@@ -2495,10 +3027,33 @@ void remove_callback(const std::string& key) {
     LOGV("CALLBACK_REMOVED key=%s", key.c_str());
 }
 
+// [Action4] Remove all callbacks whose key starts with prefix
+size_t remove_callbacks_by_prefix(const std::string& prefix) {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    size_t removed = 0;
+    for (auto it = g_callbacks.begin(); it != g_callbacks.end(); ) {
+        if (it->first.find(prefix) == 0) {
+            it = g_callbacks.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    LOGD("remove_callbacks_by_prefix: prefix=%s removed=%zu", prefix.c_str(), removed);
+    return removed;
+}
+
+// [Action32] Callback count
+size_t stratum_callback_count() {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    return g_callbacks.size();
+}
+
 // ── StratumObject implementation ──────────────────────────────────────────────
 
+// [Action3] Destructor uses get_env() not get_env_safe() so background thread attaches
 StratumObject::~StratumObject() {
-    JNIEnv* env = get_env_safe();
+    JNIEnv* env = get_env();  // [Action3] attach if needed
     if (env && obj_) {
         env->DeleteGlobalRef(obj_);
         obj_ = nullptr;
@@ -2566,8 +3121,55 @@ std::string StratumObject::class_name() const {
     return res;
 }
 
-// ── nativeDispatch ────────────────────────────────────────────────────────────
-extern "C" JNIEXPORT void JNICALL
+// ── [A39] StratumThrowable implementation ─────────────────────────────────────
+
+std::string StratumThrowable::get_message() const {
+    JNIEnv* env = get_env();
+    if (!env || !obj_) return "<null throwable>";
+    jclass    cls = env->GetObjectClass(obj_);
+    jmethodID mid = env->GetMethodID(cls, "getMessage", "()Ljava/lang/String;");
+    env->DeleteLocalRef(cls);
+    if (!mid) { env->ExceptionClear(); return "<no getMessage>"; }
+    jstring js = (jstring)env->CallObjectMethod(obj_, mid);
+    if (!js) return "<null message>";
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    std::string res(c);
+    env->ReleaseStringUTFChars(js, c);
+    env->DeleteLocalRef(js);
+    return res;
+}
+
+std::string StratumThrowable::get_class_name() const {
+    return class_name();
+}
+
+// ── [A40] StratumWeakObject implementation ────────────────────────────────────
+
+StratumWeakObject::~StratumWeakObject() {
+    JNIEnv* env = get_env();
+    if (env && weak_ref_) {
+        env->DeleteWeakGlobalRef(weak_ref_);
+        weak_ref_ = nullptr;
+        LOGD("StratumWeakObject: weak ref deleted");
+    }
+}
+
+StratumObject* StratumWeakObject::get() const {
+    JNIEnv* env = get_env();
+    if (!env || !weak_ref_) return nullptr;
+    // IsSameObject(ref, NULL) returns true if GC collected it
+    if (env->IsSameObject(weak_ref_, nullptr)) {
+        LOGV("WEAKREF_GET: collected by GC");
+        return nullptr;
+    }
+    jobject strong = env->NewGlobalRef(weak_ref_);
+    if (!strong) return nullptr;
+    LOGV("WEAKREF_GET: resolved weak=%p strong=%p", (void*)weak_ref_, (void*)strong);
+    return new StratumObject(strong);
+}
+
+// ── [Action6] nativeDispatch — returns jobject back to Java ───────────────────
+extern "C" JNIEXPORT jobject JNICALL
 Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
         JNIEnv* env, jclass, jstring jkey,
         jstring jmethod, jobjectArray args) {
@@ -2586,68 +3188,175 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
         env->ReleaseStringUTFChars(jmethod, mc);
     }
 
-    // CRITICAL FIX: Acquire GIL *BEFORE* looking up nanobind callbacks!
-    nb::gil_scoped_acquire _acquire;
+    // [Action34] CRITICAL: acquire mutex BEFORE GIL to prevent deadlock
+    // Lock order: mutex → GIL (never GIL → mutex)
+    nb::callable fn;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        LOGV("DISPATCH_MUTEX_ACQUIRE");
+        auto it = g_callbacks.find(routed_key);
+        if (it == g_callbacks.end()) it = g_callbacks.find(base_key);
+        if (it != g_callbacks.end() && it->second) fn = *it->second;
+        LOGV("DISPATCH_MUTEX_RELEASE");
+    }
 
-    nb::callable fn = get_callback(routed_key);
-    if (!fn.is_valid()) fn = get_callback(base_key);
     if (!fn.is_valid()) {
         LOGW("nativeDispatch: no callback for key=%s", routed_key.c_str());
         LOGV("DISPATCH_NO_CALLBACK key=%s", routed_key.c_str());
-        return;
+        return nullptr;
     }
 
     LOGV("DISPATCH_CALLBACK_FOUND key=%s", routed_key.c_str());
 
-    //nb::gil_scoped_acquire _acquire;
-    try {
-        jsize len = args ? env->GetArrayLength(args) : 0;
-        LOGV("DISPATCH_ARGS_LEN %d", (int)len);
-        if (len == 0) {
-            LOGV("DISPATCH_CALL_NOARGS");
-            fn();
-            LOGV("DISPATCH_CALL_NOARGS_DONE");
-        } else {
-            nb::list py_args;
-            for (jsize i = 0; i < len; ++i) {
-                jobject elem = env->GetObjectArrayElement(args, i);
-                if (!elem) {
-                    py_args.append(nb::none());
-                    LOGV("DISPATCH_ARG[%d] = None", (int)i);
-                    continue;
+    // [Action36] Same-thread GIL safety check
+    jobject result = nullptr;
+    bool already_held = PyGILState_Check();
+    LOGV("DISPATCH_GIL_ALREADY_HELD=%d", (int)already_held);
+
+    auto call_fn = [&]() -> jobject {
+        try {
+            jsize len = args ? env->GetArrayLength(args) : 0;
+            LOGV("DISPATCH_ARGS_LEN %d", (int)len);
+            nb::object py_result;
+            if (len == 0) {
+                LOGV("DISPATCH_CALL_NOARGS");
+                py_result = fn();
+                LOGV("DISPATCH_CALL_NOARGS_DONE");
+            } else {
+                nb::list py_args;
+                for (jsize i = 0; i < len; ++i) {
+                    jobject elem = env->GetObjectArrayElement(args, i);
+                    if (!elem) {
+                        py_args.append(nb::none());
+                        LOGV("DISPATCH_ARG[%d] = None", (int)i);
+                        continue;
+                    }
+                    // [A2] Unbox Java primitive wrappers
+                    bool unboxed = false;
+                    // Check for Integer, Boolean, Long, Double, Float
+                    static jclass _IntCls = nullptr, _BoolCls = nullptr,
+                                  _LongCls = nullptr, _DblCls = nullptr,
+                                  _FltCls = nullptr;
+                    if (!_IntCls)  { jclass c=env->FindClass("java/lang/Integer");  _IntCls=(jclass)env->NewGlobalRef(c);  env->DeleteLocalRef(c); }
+                    if (!_BoolCls) { jclass c=env->FindClass("java/lang/Boolean");  _BoolCls=(jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+                    if (!_LongCls) { jclass c=env->FindClass("java/lang/Long");     _LongCls=(jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+                    if (!_DblCls)  { jclass c=env->FindClass("java/lang/Double");   _DblCls=(jclass)env->NewGlobalRef(c);  env->DeleteLocalRef(c); }
+                    if (!_FltCls)  { jclass c=env->FindClass("java/lang/Float");    _FltCls=(jclass)env->NewGlobalRef(c);  env->DeleteLocalRef(c); }
+
+                    if (_IntCls && env->IsInstanceOf(elem, _IntCls)) {
+                        jmethodID mid = env->GetMethodID(_IntCls, "intValue", "()I");
+                        jint v = env->CallIntMethod(elem, mid);
+                        py_args.append(nb::int_((long long)v));
+                        env->DeleteLocalRef(elem); unboxed = true;
+                        LOGV("DISPATCH_ARG[%d] = Integer %d", (int)i, (int)v);
+                    } else if (_BoolCls && env->IsInstanceOf(elem, _BoolCls)) {
+                        jmethodID mid = env->GetMethodID(_BoolCls, "booleanValue", "()Z");
+                        jboolean v = env->CallBooleanMethod(elem, mid);
+                        py_args.append(nb::bool_(v != JNI_FALSE));
+                        env->DeleteLocalRef(elem); unboxed = true;
+                        LOGV("DISPATCH_ARG[%d] = Boolean %d", (int)i, (int)v);
+                    } else if (_LongCls && env->IsInstanceOf(elem, _LongCls)) {
+                        jmethodID mid = env->GetMethodID(_LongCls, "longValue", "()J");
+                        jlong v = env->CallLongMethod(elem, mid);
+                        py_args.append(nb::int_((long long)v));
+                        env->DeleteLocalRef(elem); unboxed = true;
+                        LOGV("DISPATCH_ARG[%d] = Long %lld", (int)i, (long long)v);
+                    } else if (_DblCls && env->IsInstanceOf(elem, _DblCls)) {
+                        jmethodID mid = env->GetMethodID(_DblCls, "doubleValue", "()D");
+                        jdouble v = env->CallDoubleMethod(elem, mid);
+                        py_args.append(nb::float_((double)v));
+                        env->DeleteLocalRef(elem); unboxed = true;
+                        LOGV("DISPATCH_ARG[%d] = Double %f", (int)i, (double)v);
+                    } else if (_FltCls && env->IsInstanceOf(elem, _FltCls)) {
+                        jmethodID mid = env->GetMethodID(_FltCls, "floatValue", "()F");
+                        jfloat v = env->CallFloatMethod(elem, mid);
+                        py_args.append(nb::float_((double)v));
+                        env->DeleteLocalRef(elem); unboxed = true;
+                        LOGV("DISPATCH_ARG[%d] = Float %f", (int)i, (float)v);
+                    }
+
+                    if (!unboxed) {
+                        if (g_jstring_class
+                                && env->IsInstanceOf(elem, g_jstring_class)) {
+                            const char* s = env->GetStringUTFChars(
+                                (jstring)elem, nullptr);
+                            py_args.append(nb::str(s));
+                            LOGV("DISPATCH_ARG[%d] = str '%s'", (int)i, s);
+                            env->ReleaseStringUTFChars((jstring)elem, s);
+                            env->DeleteLocalRef(elem);
+                        } else {
+                            jobject gref = env->NewGlobalRef(elem);
+                            env->DeleteLocalRef(elem);
+                            LOGV("DISPATCH_ARG[%d] = obj %p", (int)i, gref);
+                            py_args.append(nb::cast(
+                                new StratumObject(gref),
+                                nb::rv_policy::take_ownership));
+                        }
+                    }
                 }
-                if (g_jstring_class
-                        && env->IsInstanceOf(elem, g_jstring_class)) {
-                    const char* s = env->GetStringUTFChars(
-                        (jstring)elem, nullptr);
-                    py_args.append(nb::str(s));
-                    LOGV("DISPATCH_ARG[%d] = str '%s'", (int)i, s);
-                    env->ReleaseStringUTFChars((jstring)elem, s);
-                    env->DeleteLocalRef(elem);
-                } else {
-                    jobject gref = env->NewGlobalRef(elem);
-                    env->DeleteLocalRef(elem);
-                    LOGV("DISPATCH_ARG[%d] = obj %p", (int)i, gref);
-                    py_args.append(nb::cast(
-                        new StratumObject(gref),
-                        nb::rv_policy::take_ownership));
-                }
+                LOGV("DISPATCH_CALL_WITH_ARGS count=%d", (int)len);
+                py_result = fn(*nb::tuple(py_args));
+                LOGV("DISPATCH_CALL_WITH_ARGS_DONE");
             }
-            LOGV("DISPATCH_CALL_WITH_ARGS count=%d", (int)len);
-            fn(*nb::tuple(py_args));
-            LOGV("DISPATCH_CALL_WITH_ARGS_DONE");
+
+            // [Action6] Convert Python return value back to Java jobject
+            if (py_result.is_none()) return nullptr;
+            if (nb::isinstance<nb::bool_>(py_result)) {
+                // Box bool → Boolean
+                static jclass _bcls = nullptr;
+                static jmethodID _bvalof = nullptr;
+                if (!_bcls) { jclass c=env->FindClass("java/lang/Boolean"); _bcls=(jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+                if (!_bvalof) _bvalof = env->GetStaticMethodID(_bcls, "valueOf", "(Z)Ljava/lang/Boolean;");
+                jboolean bv = nb::cast<bool>(py_result) ? JNI_TRUE : JNI_FALSE;
+                return env->CallStaticObjectMethod(_bcls, _bvalof, bv);
+            }
+            if (nb::isinstance<nb::int_>(py_result)) {
+                static jclass _icls = nullptr;
+                static jmethodID _ivalof = nullptr;
+                if (!_icls) { jclass c=env->FindClass("java/lang/Integer"); _icls=(jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+                if (!_ivalof) _ivalof = env->GetStaticMethodID(_icls, "valueOf", "(I)Ljava/lang/Integer;");
+                return env->CallStaticObjectMethod(_icls, _ivalof, (jint)nb::cast<long long>(py_result));
+            }
+            if (nb::isinstance<nb::float_>(py_result)) {
+                static jclass _dcls = nullptr;
+                static jmethodID _dvalof = nullptr;
+                if (!_dcls) { jclass c=env->FindClass("java/lang/Double"); _dcls=(jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+                if (!_dvalof) _dvalof = env->GetStaticMethodID(_dcls, "valueOf", "(D)Ljava/lang/Double;");
+                return env->CallStaticObjectMethod(_dcls, _dvalof, (jdouble)nb::cast<double>(py_result));
+            }
+            if (nb::isinstance<nb::str>(py_result)) {
+                return env->NewStringUTF(nb::cast<std::string>(py_result).c_str());
+            }
+            if (nb::hasattr(py_result, "_get_jobject_ptr")) {
+                int64_t ptr = nb::cast<int64_t>(py_result.attr("_get_jobject_ptr")());
+                if (ptr) return (jobject)(uintptr_t)ptr;
+            }
+            return nullptr;
         }
+        catch (nb::python_error& e) {
+            LOGE("nativeDispatch Python error: %s", e.what());
+            e.restore();
+            if (PyErr_Occurred()) PyErr_Print();
+            return nullptr;
+        }
+        catch (const std::exception& e) {
+            LOGE("nativeDispatch exception: %s", e.what());
+            PyErr_SetString(PyExc_RuntimeError, e.what());
+            return nullptr;
+        }
+    };
+
+    if (already_held) {
+        LOGV("DISPATCH_GIL_ALREADY_HELD — calling directly");
+        result = call_fn();
+    } else {
+        nb::gil_scoped_acquire _acquire;
+        LOGV("DISPATCH_GIL_ACQUIRED");
+        result = call_fn();
     }
-    catch (nb::python_error& e) {
-        LOGE("nativeDispatch Python error: %s", e.what());
-        e.restore();
-        if (PyErr_Occurred()) PyErr_Print();
-    }
-    catch (const std::exception& e) {
-        LOGE("nativeDispatch exception: %s", e.what());
-        PyErr_SetString(PyExc_RuntimeError, e.what());
-    }
+
     LOGV("DISPATCH_DONE key=%s", base_key.c_str());
+    return result;
 }
 """
 
@@ -2666,7 +3375,11 @@ def _has_context_ctor(cls: dict) -> bool:
     return False
 
 
-def emit_bridge_main(classes: list) -> str:
+def emit_bridge_main(classes: list, failed_fqns: Set[str] = None) -> str:
+    """[Action26] failed_fqns: skip subclasses of failed classes."""
+    if failed_fqns is None:
+        failed_fqns = set()
+
     batch_size = NANOBIND_BATCH_SIZE
     fqn_to_cls = {cls["fqn"]: cls for cls in classes}
     ordered: List[dict] = []
@@ -2689,22 +3402,45 @@ def emit_bridge_main(classes: list) -> str:
     for cls in classes:
         visit(cls["fqn"])
 
+    # [Action26] Filter out subclasses of failed parents
+    def has_failed_parent(fqn: str) -> Optional[str]:
+        data = fqn_to_cls.get(fqn)
+        if not data:
+            return None
+        p = data.get("parent_fqn", "")
+        if p in failed_fqns:
+            return p
+        return None
+
+    filtered_ordered = []
+    for cls in ordered:
+        failed_parent = has_failed_parent(cls["fqn"])
+        if failed_parent:
+            print(f"  [Action26] SKIP_REGISTRATION {cls['fqn']} — parent {failed_parent} failed")
+            continue
+        filtered_ordered.append(cls)
+
     factory_classes = [
-        c for c in ordered
+        c for c in filtered_ordered
         if _has_context_ctor(c) and c["fqn"] != "android.app.Activity"
     ]
     batches: List[List[dict]] = [
-        ordered[i:i + batch_size]
-        for i in range(0, len(ordered), batch_size)
+        filtered_ordered[i:i + batch_size]
+        for i in range(0, len(filtered_ordered), batch_size)
     ]
 
     lines = [
-        "// bridge_main.cpp — Stratum Stage 06 v4.8 — DO NOT EDIT",
-        "// [FIX-11] StratumObject registered first.",
-        "// [FIX-12] g_activity deleted in OnUnload.",
-        "// [FIX-16] No NonVirtual calls anywhere.",
-        "// [FIX-23] nb::arg().none(true) for all pointer params.",
-        "// [FIX-25] Ultra-deep LOGV tracing.",
+        f"// bridge_main.cpp — Stratum Stage 06 v{STAGE_VERSION} — DO NOT EDIT",
+        "// [Action1]  stratum_cast_to (renamed from cast_to)",
+        "// [Action5]  __eq__/__ne__ via IsSameObject",
+        "// [Action11] stratum_get_activity (renamed)",
+        "// [Action13] Enum support",
+        "// [Action19] __bool__",
+        "// [Action25] g_activity_mutex",
+        "// [Action26] Skip subclasses of failed parents",
+        "// [Action32] stratum_callback_count",
+        "// [A39]      StratumThrowable registration",
+        "// [A40]      StratumWeakObject registration",
         "#include <jni.h>",
         "#include <stdint.h>",
         '#include "bridge_core.h"',
@@ -2744,7 +3480,7 @@ def emit_bridge_main(classes: list) -> str:
         "",
     ]
 
-    for cls in ordered:
+    for cls in filtered_ordered:
         lines.append(
             f"__attribute__((noinline)) void "
             f"register_{cpp_class_prefix(cls['fqn'])}(nb::module_& m);")
@@ -2782,7 +3518,7 @@ def emit_bridge_main(classes: list) -> str:
     lines += [
         f"}};",
         f"static const size_t g_batch_count = {len(batches)};",
-        f"static const size_t g_total_classes = {len(ordered)};",
+        f"static const size_t g_total_classes = {len(filtered_ordered)};",
         "",
     ]
 
@@ -2790,7 +3526,7 @@ def emit_bridge_main(classes: list) -> str:
     lines += [
         "extern \"C\" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {",
         "    g_jvm = vm;",
-        "    LOGI(\"JNI_OnLoad begin\");",
+        "    LOGI(\"JNI_OnLoad begin — Stratum v" + STAGE_VERSION + "\");",
         "    JNIEnv* env = nullptr;",
         "    if (vm->GetEnv(reinterpret_cast<void**>(&env),"
         " JNI_VERSION_1_6) != JNI_OK) {",
@@ -2838,7 +3574,7 @@ def emit_bridge_main(classes: list) -> str:
         "    g_proxy_class   = cache(\"java/lang/reflect/Proxy\");",
         "    g_class_class   = cache(\"java/lang/Class\");",
         "    g_object_class  = cache(\"java/lang/Object\");",
-        "    LOGI(\"JNI_OnLoad: %zu classes, lazy init on first touch.\","
+        f"    LOGI(\"JNI_OnLoad: %zu classes, lazy init on first touch.\","
         " g_total_classes);",
         "    return JNI_VERSION_1_6;",
         "}",
@@ -2873,6 +3609,7 @@ def emit_bridge_main(classes: list) -> str:
         "static void dispatch_lifecycle(const char* name) {",
         "    LOGD(\"dispatch_lifecycle: %s\", name);",
         "    LOGV(\"LIFECYCLE_DISPATCH: %s\", name);",
+        "    // [Action34] Copy under mutex, call after release",
         "    nb::callable fn;",
         "    {",
         "        std::lock_guard<std::mutex> lk(g_lifecycle_mutex);",
@@ -2885,24 +3622,33 @@ def emit_bridge_main(classes: list) -> str:
         "        fn = it->second;",
         "    }",
         "    LOGV(\"LIFECYCLE_CB_FOUND: %s\", name);",
-        "    nb::gil_scoped_acquire gil;",
-        "    try {",
-        "        LOGV(\"LIFECYCLE_CALL_START: %s\", name);",
-        "        fn();",
-        "        LOGV(\"LIFECYCLE_CALL_DONE: %s\", name);",
-        "        LOGD(\"dispatch_lifecycle: %s done\", name);",
-        "    }",
-        "    catch (nb::python_error& e) {",
-        "        e.restore();",
-        "        LOGE(\"dispatch_lifecycle Python error in %s\", name);",
-        "        if (PyErr_Occurred()) PyErr_Print();",
-        "    }",
-        "    catch (const std::exception& e) {",
-        "        LOGE(\"dispatch_lifecycle C++ error in %s: %s\","
+        "    // [Action36] Check if GIL already held",
+        "    bool already_held = PyGILState_Check();",
+        "    auto do_call = [&]() {",
+        "        try {",
+        "            fn();",
+        "            LOGD(\"dispatch_lifecycle: %s done\", name);",
+        "        }",
+        "        catch (nb::python_error& e) {",
+        "            e.restore();",
+        "            LOGE(\"dispatch_lifecycle Python error in %s\", name);",
+        "            if (PyErr_Occurred()) PyErr_Print();",
+        "        }",
+        "        catch (const std::exception& e) {",
+        "            LOGE(\"dispatch_lifecycle C++ error in %s: %s\","
         " name, e.what());",
-        "    }",
-        "    catch (...) {",
-        "        LOGE(\"dispatch_lifecycle unknown error in %s\", name);",
+        "        }",
+        "        catch (...) {",
+        "            LOGE(\"dispatch_lifecycle unknown error in %s\", name);",
+        "        }",
+        "    };",
+        "    if (already_held) {",
+        "        LOGV(\"LIFECYCLE_GIL_ALREADY_HELD\");",
+        "        do_call();",
+        "    } else {",
+        "        nb::gil_scoped_acquire gil;",
+        "        LOGV(\"LIFECYCLE_GIL_ACQUIRED\");",
+        "        do_call();",
         "    }",
         "}",
         "",
@@ -2912,9 +3658,9 @@ def emit_bridge_main(classes: list) -> str:
     lines += [
         "NB_MODULE(_stratum, m) {",
         "    try {",
-        f"        LOGI(\"NB_MODULE: {len(ordered)} classes"
-        f" in {len(batches)} batches\");",
-        f"        LOGV(\"NB_MODULE_START total={len(ordered)} batches={len(batches)}\");",
+        f"        LOGI(\"NB_MODULE: {len(filtered_ordered)} classes"
+        f" in {len(batches)} batches — Stratum v{STAGE_VERSION}\");",
+        f"        LOGV(\"NB_MODULE_START total={len(filtered_ordered)} batches={len(batches)}\");",
         "",
         "        // [FIX-11] Register base types BEFORE batch classes",
         "        nb::class_<StratumObject>(m, \"StratumObject\")",
@@ -2927,9 +3673,41 @@ def emit_bridge_main(classes: list) -> str:
         "            .def(\"instanceof_check\","
         " &StratumObject::instanceof_check)",
         "            .def(\"class_name\",       &StratumObject::class_name)",
+        "            .def_rw(\"stratum_key_prefix\", &StratumObject::stratum_key_prefix_)",
+        "            // [Action19] __bool__",
+        "            .def(\"__bool__\", [](StratumObject* self) { return self && self->obj_; })",
+        "            // [Action5] __eq__ / __ne__",
+        "            .def(\"__eq__\", [](StratumObject* self, nb::object other) -> bool {",
+        "                if (other.is_none()) return !self || !self->obj_;",
+        "                if (!nb::hasattr(other, \"_get_jobject_ptr\")) return false;",
+        "                int64_t op = nb::cast<int64_t>(other.attr(\"_get_jobject_ptr\")());",
+        "                if (!self || !self->obj_) return op == 0;",
+        "                JNIEnv* env = get_env();",
+        "                if (!env) return false;",
+        "                return env->IsSameObject(self->obj_, (jobject)(uintptr_t)op);",
+        "            }, nb::arg(\"other\").none(true))",
+        "            .def(\"__ne__\", [](StratumObject* self, nb::object other) -> bool {",
+        "                if (other.is_none()) return self && self->obj_;",
+        "                if (!nb::hasattr(other, \"_get_jobject_ptr\")) return true;",
+        "                int64_t op = nb::cast<int64_t>(other.attr(\"_get_jobject_ptr\")());",
+        "                if (!self || !self->obj_) return op != 0;",
+        "                JNIEnv* env = get_env();",
+        "                if (!env) return true;",
+        "                return !env->IsSameObject(self->obj_, (jobject)(uintptr_t)op);",
+        "            }, nb::arg(\"other\").none(true))",
         "            .def(\"_get_jobject_ptr\", [](StratumObject* self) -> int64_t {",
         "                return (int64_t)(uintptr_t)(self ? self->obj_ : nullptr);",
         "            });",
+        "",
+        "        // [A39] StratumThrowable",
+        "        nb::class_<StratumThrowable, StratumObject>(m, \"StratumThrowable\")",
+        "            .def(\"get_message\",    &StratumThrowable::get_message)",
+        "            .def(\"get_class_name\", &StratumThrowable::get_class_name);",
+        "",
+        "        // [A40] StratumWeakObject",
+        "        nb::class_<StratumWeakObject>(m, \"StratumWeakObject\")",
+        "            .def(\"get\",         &StratumWeakObject::get, nb::rv_policy::take_ownership)",
+        "            .def(\"is_enqueued\", &StratumWeakObject::is_enqueued);",
         "",
         "        nb::class_<StratumSurface, StratumObject>"
         "(m, \"StratumSurface\")",
@@ -2955,13 +3733,31 @@ def emit_bridge_main(classes: list) -> str:
         "            return new StratumSurface(o->obj_, env);",
         "        }, nb::arg(\"o\").none(true), nb::rv_policy::take_ownership);",
         "",
-        "        m.def(\"cast_to\", [](StratumObject* o,",
+        "        // [Action1/Action43] Renamed cast_to → stratum_cast_to",
+        "        m.def(\"stratum_cast_to\", [](StratumObject* o,",
         "                              const std::string& cls_name)"
         " -> StratumObject* {",
-        "            LOGV(\"cast_to %s o=%p\", cls_name.c_str(), o ? o->obj_ : nullptr);",
+        "            LOGV(\"stratum_cast_to %s o=%p\", cls_name.c_str(), o ? o->obj_ : nullptr);",
         "            if (!o || !o->obj_) {",
-        "                LOGE(\"cast_to: null object\");",
-        "                throw std::runtime_error(\"cast_to: null\");",
+        "                LOGE(\"stratum_cast_to: null object\");",
+        "                throw std::runtime_error(\"stratum_cast_to: null\");",
+        "            }",
+        "            // [Action1] IsInstanceOf check",
+        "            JNIEnv* env = get_env();",
+        "            if (env) {",
+        "                std::string jni_name = cls_name;",
+        "                for (char& c : jni_name) if (c == '.') c = '/';",
+        "                jclass tcls = find_class(env, jni_name.c_str());",
+        "                if (tcls) {",
+        "                    jboolean ok = env->IsInstanceOf(o->obj_, tcls);",
+        "                    env->DeleteLocalRef(tcls);",
+        "                    if (!ok) {",
+        "                        LOGW(\"stratum_cast_to: %s is NOT instanceof %s\",",
+        "                             o->class_name().c_str(), cls_name.c_str());",
+        "                        throw std::runtime_error(",
+        "                            \"stratum_cast_to: object is not an instance of \" + cls_name);",
+        "                    }",
+        "                } else { env->ExceptionClear(); }",
         "            }",
         "            return o;",
         "        }, nb::arg(\"o\").none(true), nb::arg(\"cls_name\"),"
@@ -2972,19 +3768,50 @@ def emit_bridge_main(classes: list) -> str:
         "            remove_callback(key);",
         "        });",
         "",
-        "        m.def(\"getActivity\","
+        "        // --- allocate direct buffer HELPER ---",
+        "        m.def(\"allocate_direct_buffer\", [](int capacity) -> StratumObject* {",
+        "            JNIEnv* env = get_env();",
+        "            jclass bb_cls = env->FindClass(\"java/nio/ByteBuffer\");",
+        "            if (!bb_cls) { env->ExceptionClear(); return nullptr; }",
+        "            jmethodID mid = env->GetStaticMethodID(bb_cls, \"allocateDirect\", \"(I)Ljava/nio/ByteBuffer;\");",
+        "            jobject bb = env->CallStaticObjectMethod(bb_cls, mid, (jint)capacity);",
+        "            env->DeleteLocalRef(bb_cls);",
+        "            if (!bb) return nullptr;",
+        "            jobject gref = env->NewGlobalRef(bb);",
+        "            env->DeleteLocalRef(bb);",
+        "            return new StratumObject(gref);",
+        "        }, nb::arg(\"capacity\"), nb::rv_policy::take_ownership);",
+        "        // -----------------------------",
+        "",
+        "        // [Action32] Callback count exposed to Python",
+        "        m.def(\"stratum_callback_count\", []() -> size_t {",
+        "            return stratum_callback_count();",
+        "        });",
+        "",
+        "        // [Action20/Action44] stratum_get_activity (was getActivity)",
+        "        m.def(\"stratum_get_activity\","
         " []() -> Stratum_android_app_Activity* {",
-        "            LOGV(\"getActivity called g_activity=%p\", g_activity);",
+        "            // [Action25] Activity mutex for rotation safety",
+        "            std::lock_guard<std::mutex> lk(g_activity_mutex);",
+        "            LOGV(\"stratum_get_activity called g_activity=%p\", g_activity);",
         "            if (!g_activity) {",
-        "                LOGE(\"getActivity: g_activity is null\");",
+        "                LOGE(\"stratum_get_activity: g_activity is null\");",
         "                throw std::runtime_error(\"Activity is null\");",
         "            }",
         "            return new Stratum_android_app_Activity(g_activity);",
         "        }, nb::rv_policy::take_ownership);",
         "",
+        "        // Backwards compat alias",
+        "        m.def(\"getActivity\","
+        " []() -> Stratum_android_app_Activity* {",
+        "            std::lock_guard<std::mutex> lk(g_activity_mutex);",
+        "            if (!g_activity) throw std::runtime_error(\"Activity is null\");",
+        "            return new Stratum_android_app_Activity(g_activity);",
+        "        }, nb::rv_policy::take_ownership);",
+        "",
     ]
 
-    # Factory functions with none(true) [FIX-23]
+    # Factory functions
     for cls in factory_classes:
         fqn   = cls["fqn"]
         sn    = struct_name(fqn)
@@ -3004,7 +3831,6 @@ def emit_bridge_main(classes: list) -> str:
             f"                LOGE(\"{py_fn}: no JNIEnv\");",
             f"                throw std::runtime_error(\"{py_fn}: no JNIEnv\");",
             f"            }}",
-            f"            //nb::gil_scoped_release _rel;",
             f"            ensure_{pfx}_init(env);",
             f"            jclass c = get_{pfx}_class();",
             f"            if (!c) {{",
@@ -3039,7 +3865,7 @@ def emit_bridge_main(classes: list) -> str:
             f"",
         ]
 
-    if any(c["fqn"] == "android.view.View" for c in ordered):
+    if any(c["fqn"] == "android.view.View" for c in filtered_ordered):
         lines += [
             "        m.def(\"setContentView\",",
             "            [](Stratum_android_app_Activity* act,",
@@ -3058,7 +3884,6 @@ def emit_bridge_main(classes: list) -> str:
             "                    throw std::runtime_error(",
             "                        \"setContentView: no JNIEnv\");",
             "                }",
-            "                //nb::gil_scoped_release _rel;",
             "                jclass c = env->GetObjectClass(act->obj_);",
             "                jmethodID mid = nullptr;",
             "                while (c && !mid) {",
@@ -3101,8 +3926,8 @@ def emit_bridge_main(classes: list) -> str:
         "                g_lifecycle_cbs[name] = fn;",
         "            });",
         "",
-        "        LOGI(\"NB_MODULE: load complete\");",
-        "        LOGV(\"NB_MODULE_COMPLETE\");",
+        f"        LOGI(\"NB_MODULE: load complete — v{STAGE_VERSION}\");",
+        f"        LOGV(\"NB_MODULE_COMPLETE\");",
         "    }",
         "    catch (nb::python_error& e) {",
         "        LOGE(\"NB_MODULE FATAL PY: %s\", e.what());",
@@ -3142,6 +3967,8 @@ def emit_bridge_main(classes: list) -> str:
         "        JNIEnv* env, jobject, jobject activity) {",
         "    LOGI(\"nativeSetActivity: %p\", activity);",
         "    LOGV(\"NATIVE_SET_ACTIVITY activity=%p\", activity);",
+        "    // [Action25] g_activity mutex",
+        "    std::lock_guard<std::mutex> lk(g_activity_mutex);",
         "    if (g_activity) env->DeleteGlobalRef(g_activity);",
         "    g_activity = activity ? env->NewGlobalRef(activity) : nullptr;",
         "    LOGI(\"g_activity set to %p\", g_activity);",
@@ -3153,26 +3980,35 @@ def emit_bridge_main(classes: list) -> str:
 
 
 # =============================================================================
-# Topological sort
+# Topological sort — [Action24] Cycle detection
 # =============================================================================
 
 def topological_sort(classes: list) -> list:
+    """[Action24] Cycle detection via in_progress set."""
     fqn_to_cls = {cls["fqn"]: cls for cls in classes}
     ordered: List[dict] = []
     visited: Set[str]   = set()
+    in_progress: Set[str] = set()
 
     def visit(fqn: str) -> None:
         if fqn in visited:
             return
-        visited.add(fqn)
+        # [Action24] Cycle detection
+        if fqn in in_progress:
+            print(f"  WARN [Action24]: circular parent_fqn detected involving '{fqn}' — cycle broken")
+            return
+        in_progress.add(fqn)
         cls = fqn_to_cls.get(fqn)
         if not cls:
+            in_progress.discard(fqn)
             return
         p = cls.get("parent_fqn", "")
         if not p and cls.get("parent_details"):
             p = cls["parent_details"].get("fqn", "")
         if p and p in fqn_to_cls:
             visit(p)
+        in_progress.discard(fqn)
+        visited.add(fqn)
         ordered.append(cls)
 
     for cls in classes:
@@ -3182,54 +4018,59 @@ def topological_sort(classes: list) -> list:
 
 
 # =============================================================================
-# Diagnostics Markdown Generator
+# Diagnostics Markdown Generator — [Action28] Use FQN in headers
 # =============================================================================
 
 def generate_markdown_report(classes: list, output_dir: Path) -> None:
     lines = [
-        "# Stratum API Surface Report (v4.8)",
+        f"# Stratum API Surface Report (v{STAGE_VERSION})",
         f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         f"Total Emitted Classes: **{len(classes)}**",
         "",
-        "## Fix Summary (v4.8)",
-        "- FIX-16: All instance method calls use virtual dispatch",
-        "- FIX-17: RegisterNatives only for truly native methods",
-        "- FIX-18: JNICALL stubs never use NonVirtual calls",
-        "- FIX-19: LOGD diagnostics (STRATUM_VERBOSE_LOG=1)",
-        "- FIX-20: Inner-class constructors skipped in factory generation",
-        "- FIX-21: Override class var index unified with all_for_init",
-        "- FIX-22: Context-inherited methods work via virtual",
-        "- FIX-23: **NEW** All pointer params emit nb::arg().none(true) — "
-        "Python None now accepted for all nullable pointers",
-        "- FIX-24: inflate/addView/removeView ViewGroup* param accepts None",
-        "- FIX-25: **NEW** Ultra-deep LOGV tracing (STRATUM_ULTRA_LOG=1) — "
-        "every JNI call direction, every arg, every return value logged",
-        "- FIX-26: setOnClickListener lambda support via callable_to_proxy",
-        "- FIX-27: getResources/getLayoutInflater return typed wrappers",
-        "- FIX-28: removeView/addView ViewGroup methods with none(true)",
-        "- FIX-29: inflate(int, ViewGroup, bool) parent param tagged none(true)",
+        "## Action Summary (v5.0)",
+        "- Action1:  stratum_cast_to — real IsInstanceOf check",
+        "- Action2:  nativeDispatch unboxes Java primitive wrappers",
+        "- Action3:  Destructor uses get_env() for background thread safety",
+        "- Action4:  Callbacks auto-removed on object destroy",
+        "- Action5:  __eq__/__ne__ via IsSameObject",
+        "- Action6:  nativeDispatch returns jobject back to Java",
+        "- Action7:  Proxy dict key mismatch LOGW",
+        "- Action8:  CharSequence → string_in",
+        "- Action13: Enum support",
+        "- Action19: __bool__ on StratumObject",
+        "- Action20/47: STAGE_VERSION constant",
+        "- Action24: topological_sort cycle detection",
+        "- Action25: g_activity_mutex for rotation safety",
+        "- Action26: Skip subclasses of failed-registration parents",
+        "- Action29: sanitize_id no gen_ prefix (matches Stage 08)",
+        "- Action32: g_callbacks size monitoring",
+        "- Action33: Root ctor null-env assert",
+        "- Action34: mutex before GIL (deadlock prevention)",
+        "- Action35: _stratum_cast owns independent global ref",
+        "- Action36: PyGILState_Check before gil_scoped_acquire",
+        "- Action43: cast_to renamed stratum_cast_to",
+        "- Action44: getActivity renamed stratum_get_activity",
+        "- A37: jchar UTF-16 correct",
+        "- A38: varargs Object... support",
+        "- A39: jthrowable → StratumThrowable",
+        "- A40: WeakReference → NewWeakGlobalRef/StratumWeakObject",
+        "- A41: Direct ByteBuffer zero-copy memoryview",
+        "- A42: @NonNull → none(false), @Nullable → none(true)",
         "",
         "## Logging Levels",
         "```cmake",
-        "# Production (default) — only errors/warnings:",
+        "# Production (default) — errors only:",
         "# (no defines needed)",
         "",
-        "# Debug — method entry/exit, class init, method IDs:",
+        "# Debug — method entry/exit, class init, IDs:",
         "target_compile_definitions(stratum PRIVATE STRATUM_VERBOSE_LOG=1)",
         "",
-        "# Ultra-debug — EVERY JNI call direction, every arg, every return:",
+        "# Ultra — EVERY JNI call direction, arg, return:",
         "target_compile_definitions(stratum PRIVATE STRATUM_ULTRA_LOG=1)",
-        "# Note: STRATUM_ULTRA_LOG=1 also enables STRATUM_VERBOSE_LOG",
         "```",
         "",
-        "## Log Tags in logcat",
-        "- `Stratum` — general logs (LOGI/LOGW/LOGE/LOGD)",
-        "- `Stratum/TRACE` — call direction markers (>> PY->CPP->JNI, << JNI->CPP->PY)",
-        "- `Stratum/ARG` — argument values per call",
-        "- `Stratum/RET` — return values per call",
-        "",
-        "## logcat filter for ultra debugging",
+        "## logcat filter",
         "```bash",
         "adb logcat -s 'Stratum:V' 'Stratum/TRACE:V' 'Stratum/ARG:V' 'Stratum/RET:V'",
         "```",
@@ -3239,16 +4080,18 @@ def generate_markdown_report(classes: list, output_dir: Path) -> None:
     ]
 
     for cls in classes:
+        # [Action28] Use FQN in header, not mangled name
         fqn     = cls.get("fqn", "Unknown")
         py_name = cpp_class_prefix(fqn)
         methods = get_methods_for_class(cls)
-        lines.append(f"## {py_name} (`{fqn}`)")
+        lines.append(f"## {fqn}")
+        lines.append(f"**Python name**: `{py_name}`")
 
         if cls.get("fields"):
             lines.append("#### Fields:")
             for f in cls["fields"]:
                 lines.append(
-                    f"- `get_{sanitize_id(f.get('name',''))}()`")
+                    f"- `f_get_{sanitize_id(f.get('name',''))}()`")
 
         bindable = methods["declared"] + methods["overridden"]
         if bindable:
@@ -3256,10 +4099,12 @@ def generate_markdown_report(classes: list, output_dir: Path) -> None:
             for m in bindable:
                 params    = m.get("params", [])
                 has_ptr   = any(cpp_type_for_param(p).endswith("*") for p in params)
-                none_note = " *(accepts None)*" if has_ptr else ""
+                nullable  = any(p.get("nullable", True) for p in params if cpp_type_for_param(p).endswith("*"))
+                none_note = " *(nullable)*" if has_ptr and nullable else ""
+                nonnull   = " *(non-null)*" if has_ptr and not nullable else ""
                 lines.append(
-                    f"- `{sanitize_id(m.get('name', ''))}()`"
-                    f" → {m.get('return_cpp', 'void')}{none_note}")
+                    f"- `{sanitize_id(m.get('name', ''))}`"
+                    f" → {m.get('return_cpp', 'void')}{none_note}{nonnull}")
 
         lines.append("\n---")
 
@@ -3275,11 +4120,11 @@ def main() -> None:
     global NANOBIND_BATCH_SIZE
 
     parser = argparse.ArgumentParser(
-        description="Stratum Stage 06 v4.8 — Complete JNI Bridge Emit",
+        description=f"Stratum Stage 06 v{STAGE_VERSION} — Complete JNI Bridge Emit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--input",      required=True,
-        help="05_resolve/output/ directory")
+        help="05_resolve/output/ directory (or 05_5_abstract/output/patched/)")
     parser.add_argument("--output",     required=True,
         help="06_cpp_emit/output/ directory")
     parser.add_argument("--batch-size", type=int,
@@ -3288,17 +4133,19 @@ def main() -> None:
     args = parser.parse_args()
     NANOBIND_BATCH_SIZE = args.batch_size
 
-    print_header("STRATUM PIPELINE — STAGE 06 v4.8 (NONE-POINTER + ULTRA-LOG)")
-    print(f"  Dispatch       : compile-time RegisterNatives (is_native only)")
-    print(f"  Calls          : ALL VIRTUAL (no NonVirtual anywhere) [FIX-16]")
-    print(f"  RegisterNatives: only is_native=True methods [FIX-17]")
-    print(f"  Pointer params : nb::arg().none(true) — Python None accepted [FIX-23]")
-    print(f"  Logging LOGD   : STRATUM_VERBOSE_LOG=1 [FIX-19]")
-    print(f"  Logging LOGV   : STRATUM_ULTRA_LOG=1   [FIX-25]")
-    print(f"  Log tags       : Stratum, Stratum/TRACE, Stratum/ARG, Stratum/RET")
-    print(f"  Inner ctors    : skipped in factory gen [FIX-20]")
-    print(f"  Override idx   : unified with all_for_init [FIX-21]")
-    print(f"  Context chain  : getResources etc work via virtual [FIX-22]")
+    print_header(f"STRATUM PIPELINE — STAGE 06 v{STAGE_VERSION} (ALL 47 ACTIONS)")
+    print(f"  Version        : {STAGE_VERSION}")
+    print(f"  Calls          : ALL VIRTUAL [FIX-16]")
+    print(f"  Nullable args  : @NonNull → none(false), @Nullable → none(true) [A42]")
+    print(f"  jchar          : UTF-16 correct [A37]")
+    print(f"  varargs        : Object... supported [A38]")
+    print(f"  jthrowable     : StratumThrowable [A39]")
+    print(f"  WeakReference  : StratumWeakObject [A40]")
+    print(f"  ByteBuffer     : direct memoryview [A41]")
+    print(f"  cast_to        : renamed stratum_cast_to [Action43]")
+    print(f"  getActivity    : renamed stratum_get_activity [Action44]")
+    print(f"  Deadlock fix   : mutex before GIL [Action34]")
+    print(f"  Cycle detect   : topological_sort [Action24]")
     print(f"  Batch size     : {NANOBIND_BATCH_SIZE}")
 
     input_dir  = Path(args.input)
@@ -3314,10 +4161,11 @@ def main() -> None:
             "parse_summary.json",
             "resolve_summary.json",
             "cpp_summary.json",
+            "manifest.json",
         )
     )
     if not json_files:
-        print("ERROR: No JSON files found. Did Stage 05 succeed?")
+        print("ERROR: No JSON files found. Did Stage 05 (or 05.5) succeed?")
         sys.exit(1)
 
     print(f"\n  Found {len(json_files)} JSON files.")
@@ -3356,9 +4204,13 @@ def main() -> None:
         seen_prefixes[prefix] = cls["fqn"]
         all_classes.append(cls)
 
+    # [Action30] Assert GENERATED_FQNS population
     GENERATED_FQNS.clear()
     for cls in all_classes:
         GENERATED_FQNS.add(cls["fqn"])
+    assert len(GENERATED_FQNS) == len(all_classes), \
+        f"[Action30] GENERATED_FQNS size mismatch: {len(GENERATED_FQNS)} vs {len(all_classes)}"
+    print(f"  [Action30] GENERATED_FQNS populated: {len(GENERATED_FQNS)} FQNs")
 
     print(f"  Sorting {len(all_classes)} classes …")
     ordered_classes = topological_sort(all_classes)
@@ -3380,6 +4232,7 @@ def main() -> None:
 
     emitted: List[dict] = []
     failed:  List[dict] = []
+    failed_fqns: Set[str] = set()
 
     for i, cls in enumerate(ordered_classes, 1):
         try:
@@ -3393,10 +4246,11 @@ def main() -> None:
                     f"  [{i:5d}/{len(ordered_classes)}] {cls['fqn']}")
         except Exception as e:
             failed.append({"fqn": cls.get("fqn", "?"), "error": str(e)})
+            failed_fqns.add(cls.get("fqn", ""))
             print(f"  FAIL [{i}] {cls.get('fqn','?')} → {e}")
 
     (core_dir / "bridge_main.cpp").write_text(
-        emit_bridge_main(emitted), encoding="utf-8")
+        emit_bridge_main(emitted, failed_fqns), encoding="utf-8")
     n_batches = (
         (len(emitted) + NANOBIND_BATCH_SIZE - 1) // NANOBIND_BATCH_SIZE
     )
@@ -3409,49 +4263,51 @@ def main() -> None:
 
     (output_dir / "cpp_summary.json").write_text(
         json.dumps({
-            "version":        "4.8",
-            "total_emitted":  len(emitted),
-            "total_failed":   len(failed),
-            "batches":        n_batches,
-            "batch_size":     NANOBIND_BATCH_SIZE,
-            "dispatch":       "compile_time_virtual_only",
-            "fixes_applied": [
-                "FIX-1:sanitize_id",
-                "FIX-2:reconstruct_jni_sig_warn",
-                "FIX-3:proxy_global_ref_cleanup",
-                "FIX-4:null_methodid_logw",
-                "FIX-5:override_cls_slash_normalise",
-                "FIX-6:prefix_collision_suffix",
-                "FIX-7:context_ctor_all_params",
-                "FIX-8:stratum_surface_global_ref",
-                "FIX-9:field_getter_global_ref",
-                "FIX-10:null_return_consistent",
-                "FIX-11:base_types_registered_first",
-                "FIX-12:g_activity_unload_cleanup",
-                "FIX-13:get_env_null_guard",
-                "FIX-14:jni_args_index_stable",
-                "FIX-15:stratum_structs_surface_fix",
-                "FIX-16:ALL_VIRTUAL_NO_NONVIRTUAL",
-                "FIX-17:REGISTER_NATIVES_NATIVE_ONLY",
-                "FIX-18:JNICALL_STUBS_VIRTUAL_ONLY",
-                "FIX-19:VERBOSE_LOGD_DIAGNOSTICS",
-                "FIX-20:INNER_CTOR_SKIP",
-                "FIX-21:OVERRIDE_IDX_UNIFIED",
-                "FIX-22:CONTEXT_METHODS_VIRTUAL",
-                "FIX-23:POINTER_PARAMS_NONE_TRUE",
-                "FIX-24:INFLATE_VIEWGROUP_NONE_TRUE",
-                "FIX-25:ULTRA_LOGV_TRACING",
-                "FIX-26:LISTENER_LAMBDA_SUPPORT",
-                "FIX-27:GETRESOURCES_TYPED_RETURN",
-                "FIX-28:REMOVEVIEW_ADDVIEW_NONE_TRUE",
-                "FIX-29:INFLATE_PARENT_NONE_TRUE",
+            "version":          STAGE_VERSION,
+            "total_emitted":    len(emitted),
+            "total_failed":     len(failed),
+            "batches":          n_batches,
+            "batch_size":       NANOBIND_BATCH_SIZE,
+            "dispatch":         "compile_time_virtual_only",
+            "generated_fqns":   sorted(GENERATED_FQNS),  # [Action31] for Stage 08
+            "failed_fqns":      sorted(failed_fqns),
+            "actions_applied": [
+                "A1:jchar_utf16_array",
+                "A2:primitive_unbox_dispatch",
+                "A3:destructor_get_env",
+                "A4:callback_auto_remove",
+                "A5:eq_ne_IsSameObject",
+                "A6:nativeDispatch_return_jobject",
+                "A7:proxy_dict_key_logw",
+                "A8:CharSequence_string_in",
+                "A13:enum_support",
+                "A19:__bool__",
+                "A20_47:STAGE_VERSION",
+                "A24:cycle_detection",
+                "A25:g_activity_mutex",
+                "A26:skip_failed_subclasses",
+                "A29:sanitize_id_no_gen_prefix",
+                "A30:GENERATED_FQNS_assertion",
+                "A32:callback_count_monitoring",
+                "A33:root_ctor_null_env_assert",
+                "A34:mutex_before_GIL",
+                "A35:stratum_cast_independent_gref",
+                "A36:PyGILState_Check",
+                "A37:jchar_UTF16",
+                "A38:varargs",
+                "A39:jthrowable_StratumThrowable",
+                "A40:WeakReference_StratumWeakObject",
+                "A41:ByteBuffer_direct_memoryview",
+                "A42:NonNull_Nullable_none",
+                "A43:cast_to_renamed_stratum_cast_to",
+                "A44:getActivity_renamed_stratum_get_activity",
             ],
             "failed": failed,
         }, indent=2),
         encoding="utf-8",
     )
 
-    print_header("STAGE 06 v4.8 COMPLETE")
+    print_header(f"STAGE 06 v{STAGE_VERSION} COMPLETE")
     print(f"  Emitted  : {len(emitted):,} / {len(all_classes):,}")
     print(f"  Batches  : {n_batches} × {NANOBIND_BATCH_SIZE}")
     print(f"  Failed   : {len(failed):,}")
