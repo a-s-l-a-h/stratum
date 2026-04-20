@@ -754,12 +754,35 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
 
     # [Action8] CharSequence → string
     if is_charsequence_param(p):
-        lines.append(
-            f"{indent}jstring jni_{name} = env->NewStringUTF({name}.c_str());")
-        lines.append(
-            f"{indent}LOGD(\"param {name} (CharSequence) = %s\", {name}.c_str());")
-        lines.append(
-            f"{indent}LOGV_STR(\"{name}\", {name});")
+        lines += [
+            f"{indent}// [PATCH-UTF8-IN] CharSequence: UTF-8→UTF-16→NewString, not NewStringUTF",
+            f"{indent}jstring jni_{name};",
+            f"{indent}{{",
+            f"{indent}    const uint8_t* _ub = reinterpret_cast<const uint8_t*>({name}.data());",
+            f"{indent}    size_t _ul = {name}.size();",
+            f"{indent}    std::u16string _u16;",
+            f"{indent}    _u16.reserve(_ul);",
+            f"{indent}    for (size_t _ui = 0; _ui < _ul; ) {{",
+            f"{indent}        uint32_t _cp = 0;",
+            f"{indent}        uint8_t _b0 = _ub[_ui];",
+            f"{indent}        if (_b0 < 0x80u)                              {{ _cp = _b0; _ui += 1; }}",
+            f"{indent}        else if ((_b0 & 0xE0u) == 0xC0u && _ui+1 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x1Fu) << 6)  | (_ub[_ui+1] & 0x3Fu); _ui += 2; }}",
+            f"{indent}        else if ((_b0 & 0xF0u) == 0xE0u && _ui+2 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x0Fu) << 12) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 6) | (_ub[_ui+2] & 0x3Fu); _ui += 3; }}",
+            f"{indent}        else if ((_b0 & 0xF8u) == 0xF0u && _ui+3 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x07u) << 18) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 12) | ((uint32_t)(_ub[_ui+2] & 0x3Fu) << 6) | (_ub[_ui+3] & 0x3Fu); _ui += 4; }}",
+            f"{indent}        else {{ ++_ui; continue; }}",
+            f"{indent}        if (_cp < 0x10000u) {{ _u16 += (char16_t)_cp; }}",
+            f"{indent}        else if (_cp < 0x110000u) {{",
+            f"{indent}            _cp -= 0x10000u;",
+            f"{indent}            _u16 += (char16_t)(0xD800u | (_cp >> 10));",
+            f"{indent}            _u16 += (char16_t)(0xDC00u | (_cp & 0x3FFu));",
+            f"{indent}        }}",
+            f"{indent}    }}",
+            f"{indent}    jni_{name} = env->NewString(",
+            f"{indent}        reinterpret_cast<const jchar*>(_u16.data()), (jsize)_u16.size());",
+            f"{indent}}}",
+            f"{indent}LOGD(\"param {name} (CharSequence→utf16 jstring) = %s\", {name}.c_str());",
+            f"{indent}LOGV_STR(\"{name}\", {name});",
+        ]
         return
 
     if conv == "bool_in":
@@ -771,12 +794,36 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
             f"{indent}LOGV_BOOL(\"{name}\", {name});")
 
     elif conv == "string_in" or jtype == "jstring":
-        lines.append(
-            f"{indent}jstring jni_{name} = env->NewStringUTF({name}.c_str());")
-        lines.append(
-            f"{indent}LOGD(\"param {name} (string) = %s\", {name}.c_str());")
-        lines.append(
-            f"{indent}LOGV_STR(\"{name}\", {name});")
+        lines += [
+            f"{indent}// [PATCH-UTF8-IN] NewStringUTF expects MUTF-8, breaks emoji from Python",
+            f"{indent}// Convert Python UTF-8 → UTF-16 → NewString() instead",
+            f"{indent}jstring jni_{name};",
+            f"{indent}{{",
+            f"{indent}    const uint8_t* _ub = reinterpret_cast<const uint8_t*>({name}.data());",
+            f"{indent}    size_t _ul = {name}.size();",
+            f"{indent}    std::u16string _u16;",
+            f"{indent}    _u16.reserve(_ul);",
+            f"{indent}    for (size_t _ui = 0; _ui < _ul; ) {{",
+            f"{indent}        uint32_t _cp = 0;",
+            f"{indent}        uint8_t _b0 = _ub[_ui];",
+            f"{indent}        if (_b0 < 0x80u)                              {{ _cp = _b0; _ui += 1; }}",
+            f"{indent}        else if ((_b0 & 0xE0u) == 0xC0u && _ui+1 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x1Fu) << 6)  | (_ub[_ui+1] & 0x3Fu); _ui += 2; }}",
+            f"{indent}        else if ((_b0 & 0xF0u) == 0xE0u && _ui+2 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x0Fu) << 12) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 6) | (_ub[_ui+2] & 0x3Fu); _ui += 3; }}",
+            f"{indent}        else if ((_b0 & 0xF8u) == 0xF0u && _ui+3 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x07u) << 18) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 12) | ((uint32_t)(_ub[_ui+2] & 0x3Fu) << 6) | (_ub[_ui+3] & 0x3Fu); _ui += 4; }}",
+            f"{indent}        else {{ ++_ui; continue; }}",
+            f"{indent}        if (_cp < 0x10000u) {{ _u16 += (char16_t)_cp; }}",
+            f"{indent}        else if (_cp < 0x110000u) {{",
+            f"{indent}            _cp -= 0x10000u;",
+            f"{indent}            _u16 += (char16_t)(0xD800u | (_cp >> 10));",
+            f"{indent}            _u16 += (char16_t)(0xDC00u | (_cp & 0x3FFu));",
+            f"{indent}        }}",
+            f"{indent}    }}",
+            f"{indent}    jni_{name} = env->NewString(",
+            f"{indent}        reinterpret_cast<const jchar*>(_u16.data()), (jsize)_u16.size());",
+            f"{indent}}}",
+            f"{indent}LOGD(\"param {name} (string→utf16 jstring) = %s\", {name}.c_str());",
+            f"{indent}LOGV_STR(\"{name}\", {name});",
+        ]
 
     elif conv == "abstract_adapter":
         lines.append(
@@ -979,15 +1026,49 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
         lines += [
             f"{indent}if (!raw) {{ LOGD(\"return string = null\"); "
             f"LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string(null)\"); return \"\"; }}",
-            f"{indent}const char* _ch = "
-            f"env->GetStringUTFChars((jstring)raw, nullptr);",
-            f"{indent}std::string _res(_ch);",
-            f"{indent}env->ReleaseStringUTFChars((jstring)raw, _ch);",
-            f"{indent}env->DeleteLocalRef((jobject)raw);",
-            f"{indent}LOGD(\"return string = %s\", _res.c_str());",
-            f"{indent}LOGV_RET_STR(\"{mname}\", _res);",
-            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string\");",
-            f"{indent}return _res;",
+            f"{indent}// [PATCH-UTF8-RET] GetStringChars (UTF-16) → standard UTF-8",
+            f"{indent}// GetStringUTFChars returns MUTF-8 which breaks emoji in Python",
+            f"{indent}{{",
+            f"{indent}    jsize _slen = env->GetStringLength((jstring)raw);",
+            f"{indent}    const jchar* _sjc = env->GetStringChars((jstring)raw, nullptr);",
+            f"{indent}    std::string _res;",
+            f"{indent}    if (_sjc && _slen > 0) {{",
+            f"{indent}        _res.reserve((size_t)_slen * 3);",
+            f"{indent}        for (jsize _si = 0; _si < _slen; ) {{",
+            f"{indent}            uint32_t _cp;",
+            f"{indent}            uint16_t _c1 = (uint16_t)_sjc[_si++];",
+            f"{indent}            if (_c1 >= 0xD800u && _c1 <= 0xDBFFu && _si < _slen) {{",
+            f"{indent}                uint16_t _c2 = (uint16_t)_sjc[_si];",
+            f"{indent}                if (_c2 >= 0xDC00u && _c2 <= 0xDFFFu) {{",
+            f"{indent}                    _cp = 0x10000u + (((uint32_t)(_c1 - 0xD800u)) << 10)",
+            f"{indent}                               + (uint32_t)(_c2 - 0xDC00u);",
+            f"{indent}                    ++_si;",
+            f"{indent}                }} else {{ _cp = _c1; }}",
+            f"{indent}            }} else {{ _cp = _c1; }}",
+            f"{indent}            if (_cp < 0x80u) {{",
+            f"{indent}                _res += (char)_cp;",
+            f"{indent}            }} else if (_cp < 0x800u) {{",
+            f"{indent}                _res += (char)(0xC0u | (_cp >> 6));",
+            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
+            f"{indent}            }} else if (_cp < 0x10000u) {{",
+            f"{indent}                _res += (char)(0xE0u | (_cp >> 12));",
+            f"{indent}                _res += (char)(0x80u | ((_cp >> 6) & 0x3Fu));",
+            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
+            f"{indent}            }} else {{",
+            f"{indent}                _res += (char)(0xF0u | (_cp >> 18));",
+            f"{indent}                _res += (char)(0x80u | ((_cp >> 12) & 0x3Fu));",
+            f"{indent}                _res += (char)(0x80u | ((_cp >> 6)  & 0x3Fu));",
+            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
+            f"{indent}            }}",
+            f"{indent}        }}",
+            f"{indent}    }}",
+            f"{indent}    if (_sjc) env->ReleaseStringChars((jstring)raw, _sjc);",
+            f"{indent}    env->DeleteLocalRef((jobject)raw);",
+            f"{indent}    LOGD(\"return string(utf16) len=%d\", (int)_slen);",
+            f"{indent}    LOGV_RET_STR(\"{mname}\", _res);",
+            f"{indent}    LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string(utf16)\");",
+            f"{indent}    return _res;",
+            f"{indent}}}",
         ]
 
     elif ret_decl == "nb::bytes" or ret_sig == "[B":
@@ -3334,9 +3415,32 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
             return nullptr;
         }
         catch (nb::python_error& e) {
-            LOGE("nativeDispatch Python error: %s", e.what());
+            // [PATCH-PYEXC] Propagate Python exception to Java as RuntimeException
+            // Before: silent nullptr → Java NPE with no traceback
+            // After:  Java sees RuntimeException with Python message inside
+            std::string _pymsg = e.what();
+            LOGE("nativeDispatch Python error: %s", _pymsg.c_str());
+            LOGD("[PATCH-PYEXC] translating Python error to Java RuntimeException");
+            LOGV("[PATCH-PYEXC] py_msg=%s", _pymsg.c_str());
+            // Clear Python error state BEFORE any JNI call
             e.restore();
-            if (PyErr_Occurred()) PyErr_Print();
+            PyErr_Clear();
+            // Throw into Java only if no Java exception is already pending
+            if (!env->ExceptionCheck()) {
+                jclass _rex = env->FindClass("java/lang/RuntimeException");
+                if (_rex) {
+                    std::string _full = "[Stratum] Python error: " + _pymsg;
+                    env->ThrowNew(_rex, _full.c_str());
+                    env->DeleteLocalRef(_rex);
+                    LOGD("[PATCH-PYEXC] Java RuntimeException thrown OK");
+                    LOGV("[PATCH-PYEXC] ThrowNew done msg=%s", _full.c_str());
+                } else {
+                    env->ExceptionClear();
+                    LOGE("[PATCH-PYEXC] could not find RuntimeException class");
+                }
+            } else {
+                LOGW("[PATCH-PYEXC] Java exception already pending, not overwriting");
+            }
             return nullptr;
         }
         catch (const std::exception& e) {
