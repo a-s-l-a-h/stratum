@@ -9,6 +9,8 @@ note.txt
 # ── Fullcode ──────────────────────────────────────────────────────────────────
 # Ignore the entire fullcode directory at the root
 /fullcode/
+/temp/
+temp/
 
 # ── Third Party ───────────────────────────────────────────────────────────────
 # Ignore everything inside the third_party folder...

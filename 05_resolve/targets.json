@@ -1,15 +1,43 @@
 {
   "enabled": true,
-  "closure_mode": "parents_only",
+  "closure_mode": "parents_and_interfaces",
   "targets": [
     { "fqn": "android.app.Activity" },
-    { "fqn": "android.view.ContextThemeWrapper" },
-    { "fqn": "android.content.ContextWrapper" },
     { "fqn": "android.content.Context" },
+
     { "fqn": "android.view.View" },
+    { "fqn": "android.view.View$OnClickListener" },
     { "fqn": "android.view.ViewGroup" },
-    { "fqn": "android.widget.TextView" },
+    { "fqn": "android.view.Gravity" },
+    { "fqn": "android.widget.FrameLayout" },
+    { "fqn": "android.widget.LinearLayout" },
+    { "fqn": "android.widget.LinearLayout$LayoutParams" },
     { "fqn": "android.widget.Button" },
-    { "fqn": "android.widget.LinearLayout" }
+    { "fqn": "android.widget.ImageView" },
+    { "fqn": "android.graphics.Color" },
+
+    { "fqn": "android.os.Handler" },
+    { "fqn": "android.os.Looper" },
+
+    { "fqn": "java.util.Arrays" },
+    { "fqn": "java.util.List" },
+    { "fqn": "java.util.ArrayList" },
+    { "fqn": "java.nio.ByteBuffer" },
+    { "fqn": "java.nio.Buffer" },
+
+    { "fqn": "android.graphics.SurfaceTexture" },
+    { "fqn": "android.graphics.Bitmap" },
+    { "fqn": "android.view.Surface" },
+    { "fqn": "android.view.TextureView" },
+    { "fqn": "android.view.TextureView$SurfaceTextureListener" },
+
+    { "fqn": "android.hardware.camera2.CameraManager" },
+    { "fqn": "android.hardware.camera2.CameraDevice" },
+    { "fqn": "android.hardware.camera2.CameraDevice$StateCallback" },
+    { "fqn": "android.hardware.camera2.CameraCaptureSession" },
+    { "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback" },
+    { "fqn": "android.hardware.camera2.CaptureRequest" },
+    { "fqn": "android.hardware.camera2.CaptureRequest$Builder" },
+    { "fqn": "android.hardware.camera2.CameraCharacteristics" }
   ]
 }
