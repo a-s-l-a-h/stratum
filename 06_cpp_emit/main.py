@@ -323,7 +323,12 @@ def to_jni_slash(class_name: str) -> str:
 
 def is_throwable_class(jni_class: str) -> bool:
     """[A39] Check if a JNI class name is a Throwable subclass."""
-    return jni_class in THROWABLE_CLASSES or jni_class.endswith("Exception") or jni_class.endswith("Error")
+    if jni_class in THROWABLE_CLASSES or jni_class.endswith("Exception"):
+        return True
+    # Prevent false positives like android/webkit/WebResourceError
+    if jni_class.startswith("java/lang/") and jni_class.endswith("Error"):
+        return True
+    return False
 
 
 def is_weakref_class(jni_class: str) -> bool:
@@ -749,6 +754,20 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
             f"{indent}LOGV_INT(\"varargs_len\", (int64_t)_varargs_len);",
         ]
         return
+    
+    # --- FIX: Evaluate Python adapters before pointer casts ---
+    if conv == "abstract_adapter":
+        lines.append(f"{indent}jobject jni_{name} = create_proxy_m{mi}_{name}(env, {name});")
+        lines.append(f"{indent}LOGD(\"param {name} (abstract adapter) = %p\", jni_{name});")
+        lines.append(f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+        return
+
+    if conv == "callable_to_proxy":
+        lines.append(f"{indent}jobject jni_{name} = create_proxy_m{mi}_{name}(env, {name});")
+        lines.append(f"{indent}LOGD(\"param {name} (proxy) created = %p\", jni_{name});")
+        lines.append(f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+        return
+    # ----------------------------------------------------------
 
     # [A39] Throwable param — wrap as StratumThrowable
     jni_class = p.get("jni_class", "").replace(".", "/")
@@ -839,24 +858,30 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
             f"{indent}LOGD(\"param {name} (string→utf16 jstring) = %s\", {name}.c_str());",
             f"{indent}LOGV_STR(\"{name}\", {name});",
         ]
+    # below -------- ----- this two elif not used --- more like dead condition code
 
-    elif conv == "abstract_adapter":
-        lines.append(
-            f"{indent}jobject jni_{name} = "
-            f"create_proxy_m{mi}_{name}(env, {name});")
-        lines.append(
-            f"{indent}LOGD(\"param {name} (abstract adapter) = %p\", jni_{name});")
-        lines.append(
-            f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
 
-    elif conv == "callable_to_proxy":
-        lines.append(
-            f"{indent}jobject jni_{name} = "
-            f"create_proxy_m{mi}_{name}(env, {name});")
-        lines.append(
-            f"{indent}LOGD(\"param {name} (proxy) created = %p\", jni_{name});")
-        lines.append(
-            f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+    # elif conv == "abstract_adapter":
+    #     lines.append(
+    #         f"{indent}jobject jni_{name} = "
+    #         f"create_proxy_m{mi}_{name}(env, {name});")
+    #     lines.append(
+    #         f"{indent}LOGD(\"param {name} (abstract adapter) = %p\", jni_{name});")
+    #     lines.append(
+    #         f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+
+    # elif conv == "callable_to_proxy":
+    #     lines.append(
+    #         f"{indent}jobject jni_{name} = "
+    #         f"create_proxy_m{mi}_{name}(env, {name});")
+    #     lines.append(
+    #         f"{indent}LOGD(\"param {name} (proxy) created = %p\", jni_{name});")
+    #     lines.append(
+    #         f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
+
+
+
+    #----------------------------------------------------------------------
 
     elif java_type and java_type in GENERATED_FQNS:
         lines.append(
@@ -2176,7 +2201,9 @@ def _emit_instance_method(
     for p in params:
         pname = sanitize_id(p["name"])
         ptype = cpp_type_for_param(p)
-        if ptype.endswith("*"):
+        if ptype == "StratumWeakObject*":
+            lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->weak_ref_ : nullptr);")
+        elif ptype.endswith("*"):
             lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->obj_ : nullptr);")
         elif ptype == "std::string" or ptype == "const std::string&":
             lines.append(f"    LOGV_STR(\"{pname}\", {pname});")
@@ -2618,7 +2645,9 @@ def emit_class_cpp(cls: dict) -> str:
         for p in params:
             pname = sanitize_id(p["name"])
             ptype = cpp_type_for_param(p)
-            if ptype.endswith("*"):
+            if ptype == "StratumWeakObject*":
+                lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->weak_ref_ : nullptr);")
+            elif ptype.endswith("*"):
                 lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->obj_ : nullptr);")
             emit_param_conversion(p, global_idx, lines, method_name=m["name"])
         args = (", " + jni_args(params)) if params else ""
@@ -2692,7 +2721,9 @@ def emit_class_cpp(cls: dict) -> str:
             for p in params:
                 pname = sanitize_id(p["name"])
                 ptype = cpp_type_for_param(p)
-                if ptype.endswith("*"):
+                if ptype == "StratumWeakObject*":
+                    lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->weak_ref_ : nullptr);")
+                elif ptype.endswith("*"):
                     lines.append(f"    LOGV_PTR(\"{pname}\", {pname} ? {pname}->obj_ : nullptr);")
                 emit_param_conversion(p, idx_c, lines, method_name="<init>")
             args = (", " + jni_args(params)) if params else ""

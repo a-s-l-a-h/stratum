@@ -24,6 +24,7 @@
     { "fqn": "java.util.ArrayList" },
     { "fqn": "java.nio.ByteBuffer" },
     { "fqn": "java.nio.Buffer" },
+    
 
     { "fqn": "android.graphics.SurfaceTexture" },
     { "fqn": "android.graphics.Bitmap" },
