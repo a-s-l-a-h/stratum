@@ -34,6 +34,23 @@ import sys
 import os
 
 # --- Core Re-exports ---
+# --- Core Re-exports ---
+def set_log_enabled(enabled: bool):
+    """Enable or disable Stratum verbose/ultra logging at runtime."""
+    if hasattr(_core, "set_log_enabled"):
+        _core.set_log_enabled(enabled)
+
+def is_log_enabled() -> bool:
+    """Check if Stratum runtime logging is enabled."""
+    if hasattr(_core, "is_log_enabled"):
+        return _core.is_log_enabled()
+    return False
+
+def log_msg(msg: str):
+    """Print a custom log message to Android logcat (under the 'Stratum/Py' tag)."""
+    if hasattr(_core, "log_msg"):
+        _core.log_msg(msg)
+        
 def getActivity():
     """Return the current Android Activity. Call inside onCreate()."""
     return _core.stratum_get_activity()

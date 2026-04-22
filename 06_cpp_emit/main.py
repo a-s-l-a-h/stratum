@@ -196,75 +196,71 @@ VERBOSE_LOG_HEADER = """\
 #define STRATUM_ULTRA_LOG 0
 #endif
 
+extern bool g_stratum_log_enabled;
+
 // LOGD: method entry/exit, class init, field/method IDs
 #if STRATUM_VERBOSE_LOG || STRATUM_ULTRA_LOG
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "Stratum", __VA_ARGS__)
+#define LOGD(...) do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_DEBUG, "Stratum", __VA_ARGS__); } while(0)
 #else
 #define LOGD(...) ((void)0)
 #endif
 
 // LOGV: every JNI call, every argument value, every return value
 #if STRATUM_ULTRA_LOG
-#define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__)
-#else
-#define LOGV(...) ((void)0)
-#endif
-
-// LOGT: trace direction markers
-#if STRATUM_ULTRA_LOG
-#define LOGT_PY_TO_JNI(cls, meth) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \\
-        ">> PY->CPP->JNI  %s#%s", cls, meth)
-#define LOGT_JNI_TO_PY(cls, meth, ret) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \\
-        "<< JNI->CPP->PY  %s#%s  ret=%s", cls, meth, ret)
-#define LOGT_JNICALL_IN(cls, meth) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \\
-        ">> JNICALL  %s#%s  (Java->JNI->CPP->PY)", cls, meth)
-#define LOGT_JNICALL_OUT(cls, meth) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \\
-        "<< JNICALL  %s#%s  (PY->CPP->JNI->Java)", cls, meth)
-#define LOGV_PTR(name, ptr) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \\
-        "  arg '%s' = jobject %p  (null=%s)", name, (void*)(ptr), (ptr)==nullptr?"YES":"no")
-#define LOGV_STR(name, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \\
-        "  arg '%s' = string '%s'", name, (val).c_str())
-#define LOGV_INT(name, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \\
-        "  arg '%s' = %lld", name, (long long)(val))
-#define LOGV_BOOL(name, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \\
-        "  arg '%s' = %s", name, (val)?"true":"false")
-#define LOGV_RET_PTR(meth, ptr) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \\
-        "  return from '%s' = jobject %p  (null=%s)", meth, (void*)(ptr), (ptr)==nullptr?"YES":"no")
-#define LOGV_RET_STR(meth, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \\
-        "  return from '%s' = string '%s'", meth, (val).c_str())
-#define LOGV_RET_INT(meth, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \\
-        "  return from '%s' = %lld", meth, (long long)(val))
-#define LOGV_RET_BOOL(meth, val) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \\
-        "  return from '%s' = %s", meth, (val)?"true":"false")
-#define LOGV_PYOBJ(name, obj) \\
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \\
-        "  arg '%s' = nb::object %p", name, (void*)(obj).ptr())
+#define LOGV(...) do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__); } while(0)
+#define LOGT_PY_TO_JNI(cls, meth) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        ">> PY->CPP->JNI  %s#%s", cls, meth); } while(0)
+#define LOGT_JNI_TO_PY(cls, meth, ret) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        "<< JNI->CPP->PY  %s#%s  ret=%s", cls, meth, ret); } while(0)
+#define LOGT_JNICALL_IN(cls, meth) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        ">> JNICALL  %s#%s  (Java->JNI->CPP->PY)", cls, meth); } while(0)
+#define LOGT_JNICALL_OUT(cls, meth) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        "<< JNICALL  %s#%s  (PY->CPP->JNI->Java)", cls, meth); } while(0)
+#define LOGV_PTR(name, ptr) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = jobject %p  (null=%s)", name, (void*)(ptr), (ptr)==nullptr?"YES":"no"); } while(0)
+#define LOGV_STR(name, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = string '%s'", name, (val).c_str()); } while(0)
+#define LOGV_INT(name, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = %lld", name, (long long)(val)); } while(0)
+#define LOGV_BOOL(name, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = %s", name, (val)?"true":"false"); } while(0)
+#define LOGV_RET_PTR(meth, ptr) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \
+        "  return from '%s' = jobject %p  (null=%s)", meth, (void*)(ptr), (ptr)==nullptr?"YES":"no"); } while(0)
+#define LOGV_RET_STR(meth, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \
+        "  return from '%s' = string '%s'", meth, (val).c_str()); } while(0)
+#define LOGV_RET_INT(meth, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \
+        "  return from '%s' = %lld", meth, (long long)(val)); } while(0)
+#define LOGV_RET_BOOL(meth, val) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/RET", \
+        "  return from '%s' = %s", meth, (val)?"true":"false"); } while(0)
+#define LOGV_PYOBJ(name, obj) \
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = nb::object %p", name, (void*)(obj).ptr()); } while(0)
 #else
 #define LOGT_PY_TO_JNI(cls, meth)        ((void)0)
 #define LOGT_JNI_TO_PY(cls, meth, ret)   ((void)0)
-#define LOGT_JNICALL_IN(cls, meth)        ((void)0)
-#define LOGT_JNICALL_OUT(cls, meth)       ((void)0)
-#define LOGV_PTR(name, ptr)               ((void)0)
-#define LOGV_STR(name, val)               ((void)0)
-#define LOGV_INT(name, val)               ((void)0)
-#define LOGV_BOOL(name, val)              ((void)0)
-#define LOGV_RET_PTR(meth, ptr)           ((void)0)
-#define LOGV_RET_STR(meth, val)           ((void)0)
-#define LOGV_RET_INT(meth, val)           ((void)0)
-#define LOGV_RET_BOOL(meth, val)          ((void)0)
-#define LOGV_PYOBJ(name, obj)             ((void)0)
+#define LOGT_JNICALL_IN(cls, meth)       ((void)0)
+#define LOGT_JNICALL_OUT(cls, meth)      ((void)0)
+#define LOGV_PTR(name, ptr)              ((void)0)
+#define LOGV_STR(name, val)              ((void)0)
+#define LOGV_INT(name, val)              ((void)0)
+#define LOGV_BOOL(name, val)             ((void)0)
+#define LOGV_RET_PTR(meth, ptr)          ((void)0)
+#define LOGV_RET_STR(meth, val)          ((void)0)
+#define LOGV_RET_INT(meth, val)          ((void)0)
+#define LOGV_RET_BOOL(meth, val)         ((void)0)
+#define LOGV_PYOBJ(name, obj)            ((void)0)
 #endif
 """
 
@@ -3219,28 +3215,32 @@ def emit_bridge_core_cpp() -> str:
 #ifndef STRATUM_ULTRA_LOG
 #define STRATUM_ULTRA_LOG 0
 #endif
+extern bool g_stratum_log_enabled;
+
 #if STRATUM_VERBOSE_LOG || STRATUM_ULTRA_LOG
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "Stratum", __VA_ARGS__)
+#define LOGD(...) do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_DEBUG, "Stratum", __VA_ARGS__); } while(0)
 #else
 #define LOGD(...) ((void)0)
 #endif
 #if STRATUM_ULTRA_LOG
-#define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__)
+#define LOGV(...) do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__); } while(0)
 #define LOGT_PY_TO_JNI(cls, meth) \
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
-        ">> PY->CPP->JNI  %s#%s", cls, meth)
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        ">> PY->CPP->JNI  %s#%s", cls, meth); } while(0)
 #define LOGT_JNI_TO_PY(cls, meth, ret) \
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
-        "<< JNI->CPP->PY  %s#%s  ret=%s", cls, meth, ret)
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/TRACE", \
+        "<< JNI->CPP->PY  %s#%s  ret=%s", cls, meth, ret); } while(0)
 #define LOGV_PTR(name, ptr) \
-    __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
-        "  arg '%s' = jobject %p  (null=%s)", name, (void*)(ptr), (ptr)==nullptr?"YES":"no")
+    do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
+        "  arg '%s' = jobject %p  (null=%s)", name, (void*)(ptr), (ptr)==nullptr?"YES":"no"); } while(0)
 #else
 #define LOGV(...)                       ((void)0)
 #define LOGT_PY_TO_JNI(cls, meth)      ((void)0)
 #define LOGT_JNI_TO_PY(cls, meth, ret) ((void)0)
 #define LOGV_PTR(name, ptr)            ((void)0)
 #endif
+
+bool g_stratum_log_enabled = true;
 
 JavaVM*   g_jvm      = nullptr;
 jobject   g_activity = nullptr;
@@ -3853,15 +3853,16 @@ def emit_bridge_main(classes: list, failed_fqns: Set[str] = None) -> str:
         "#ifndef STRATUM_ULTRA_LOG",
         "#define STRATUM_ULTRA_LOG 0",
         "#endif",
+        "extern bool g_stratum_log_enabled;",
         "#if STRATUM_VERBOSE_LOG || STRATUM_ULTRA_LOG",
-        "#define LOGD(...) __android_log_print("
-        "ANDROID_LOG_DEBUG, \"Stratum\", __VA_ARGS__)",
+        "#define LOGD(...) do { if (g_stratum_log_enabled) __android_log_print("
+        "ANDROID_LOG_DEBUG, \"Stratum\", __VA_ARGS__); } while(0)",
         "#else",
         "#define LOGD(...) ((void)0)",
         "#endif",
         "#if STRATUM_ULTRA_LOG",
-        "#define LOGV(...) __android_log_print("
-        "ANDROID_LOG_VERBOSE, \"Stratum\", __VA_ARGS__)",
+        "#define LOGV(...) do { if (g_stratum_log_enabled) __android_log_print("
+        "ANDROID_LOG_VERBOSE, \"Stratum\", __VA_ARGS__); } while(0)",
         "#else",
         "#define LOGV(...) ((void)0)",
         "#endif",
@@ -4156,6 +4157,22 @@ def emit_bridge_main(classes: list, failed_fqns: Set[str] = None) -> str:
         " [](const std::string& key) {",
         "            remove_callback(key);",
         "        });",
+        "",
+        "        // --- Logging Toggles ---",
+        "        m.def(\"set_log_enabled\", [](bool enabled) {",
+        "            g_stratum_log_enabled = enabled;",
+        "        }, nb::arg(\"enabled\"), \"Turn C++ bridge logging ON or OFF at runtime\");",
+        "",
+        "        m.def(\"is_log_enabled\", []() -> bool {",
+        "            return g_stratum_log_enabled;",
+        "        }, \"Check if bridge logging is currently active\");",
+        "",
+        "        m.def(\"log_msg\", [](const std::string& msg) {",
+        "        #if STRATUM_VERBOSE_LOG || STRATUM_ULTRA_LOG",
+        "            // Always print manual python logs, ignoring the g_stratum_log_enabled toggle",
+        "            __android_log_print(ANDROID_LOG_INFO, \"Stratum\", \"[Python] %s\", msg.c_str());",
+        "        #endif",
+        "        }, nb::arg(\"msg\"), \"Print custom message to Android logcat (only works if compiled with --verbose-log or --ultra-log)\");",
         "",
         "        // --- allocate direct buffer HELPER ---",
         "        m.def(\"allocate_direct_buffer\", [](int capacity) -> StratumObject* {",

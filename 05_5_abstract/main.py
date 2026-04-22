@@ -357,7 +357,7 @@ def emit_interface_adapter(fqn, data):
     lines += [
         f"    public {cls_name}(String key) {{",
         f"        this.key_ = key;",
-        f"        Log.d(TAG, \"[{cls_name}] created key=\" + key);",
+        f"        //Log.d(TAG, \"[{cls_name}] created key=\" + key);",
         f"    }}",
         f"",
     ]
@@ -406,7 +406,7 @@ def _constructor_block(cls_name, ctors, has_no_arg):
             f"    public {cls_name}(String key) {{",
             f"        super();",
             f"        this.key_ = key;",
-            f"        Log.d(TAG, \"[{cls_name}] created key=\" + key);",
+            f"        //Log.d(TAG, \"[{cls_name}] created key=\" + key);",
             f"    }}",
             f"",
         ]
@@ -422,7 +422,7 @@ def _constructor_block(cls_name, ctors, has_no_arg):
             f"    public {cls_name}(String key, {', '.join(decls)}) {{",
             f"        super({', '.join(args)});",
             f"        this.key_ = key;",
-            f"        Log.d(TAG, \"[{cls_name}] created (full ctor) key=\" + key);",
+            f"        //Log.d(TAG, \"[{cls_name}] created (full ctor) key=\" + key);",
             f"    }}",
             f"",
             f"    public {cls_name}(String key) {{",
@@ -459,7 +459,7 @@ def _method_overrides(cls_name, methods, is_interface):
         lines += [
             f"    @Override",
             f"    public {ret_java} {mname}({', '.join(decls)}) {{",
-            f"        Log.d(TAG, \"[{cls_name}] {mname} key=\" + key_ + \" params={len(params)}\");",
+            f"        //Log.d(TAG, \"[{cls_name}] {mname} key=\" + key_ + \" params={len(params)}\");",
             f"        StratumInvocationHandler.nativeDispatch(",
             f"            key_, \"{mname}\", {args_expr});",
         ]
