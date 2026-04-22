@@ -6,6 +6,10 @@ Stratum is a build-time pipeline that reads Android SDK `.class` files, generate
 
 > ⚠️ **Stratum — Active Development.** This is not a finished product. You will hit errors. Stages may fail on edge cases.
 
+### 🔗 Ongoing examples  
+https://github.com/a-s-l-a-h/stratum_ongoing_examples
+
+
 > 📌 Looking for working examples?  
 > The `main` branch is under active development and may be unstable.  
 > For a basic working setup and examples, check the `v0.2` branch:
