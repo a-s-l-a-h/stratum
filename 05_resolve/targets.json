@@ -39,6 +39,14 @@
     { "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback" },
     { "fqn": "android.hardware.camera2.CaptureRequest" },
     { "fqn": "android.hardware.camera2.CaptureRequest$Builder" },
-    { "fqn": "android.hardware.camera2.CameraCharacteristics" }
+    { "fqn": "android.hardware.camera2.CameraCharacteristics" },
+
+    { "fqn": "android.graphics.Matrix" },
+    { "fqn": "android.graphics.RectF" },
+    { "fqn": "android.view.WindowManager" },
+    { "fqn": "android.view.Display" },
+    { "fqn": "android.hardware.camera2.params.StreamConfigurationMap" },
+    { "fqn": "android.util.Size" },
+    {"fqn": "android.graphics.Rect"}
   ]
 }
