@@ -4,12 +4,40 @@
     "android.app.admin.NetworkEvent"
   ],
   "targets": [
-    {
-      "fqn": "android.hardware.camera2.CameraDevice$StateCallback"
-    },
-    {
-      "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback"
-    },
-    { "fqn": "android.view.TextureView$SurfaceTextureListener" }
+
+    { "fqn": "android.hardware.camera2.CameraDevice$StateCallback" },
+    { "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback" },
+    { "fqn": "android.hardware.camera2.CameraCaptureSession$CaptureCallback" },
+
+    { "fqn": "android.view.TextureView$SurfaceTextureListener" },
+    { "fqn": "android.view.SurfaceHolder$Callback" },
+
+    { "fqn": "android.widget.SeekBar$OnSeekBarChangeListener" },
+    { "fqn": "android.widget.AdapterView$OnItemSelectedListener" },
+
+    { "fqn": "android.text.TextWatcher" },
+
+    { "fqn": "android.content.DialogInterface$OnClickListener" },
+    { "fqn": "android.content.DialogInterface$OnDismissListener" },
+    { "fqn": "android.content.DialogInterface$OnCancelListener" },
+
+    { "fqn": "android.hardware.SensorEventListener" },
+
+    { "fqn": "android.location.LocationListener" },
+    { "fqn": "android.location.GnssStatus$Callback" },
+    { "fqn": "android.location.GnssMeasurementsEvent$Callback" },
+
+    { "fqn": "android.media.ImageReader$OnImageAvailableListener" },
+    { "fqn": "android.media.MediaRecorder$OnErrorListener" },
+    { "fqn": "android.media.MediaPlayer$OnCompletionListener" },
+    { "fqn": "android.media.MediaPlayer$OnErrorListener" },
+    { "fqn": "android.media.MediaPlayer$OnPreparedListener" },
+    { "fqn": "android.media.MediaPlayer$OnBufferingUpdateListener" },
+
+    { "fqn": "android.webkit.WebViewClient" },
+    { "fqn": "android.webkit.WebChromeClient" },
+    { "fqn": "android.webkit.ValueCallback" },
+
+    { "fqn": "android.view.View$OnLongClickListener" }
   ]
 }
