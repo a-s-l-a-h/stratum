@@ -248,6 +248,7 @@ extern bool g_stratum_log_enabled;
     do { if (g_stratum_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum/ARG", \
         "  arg '%s' = nb::object %p", name, (void*)(obj).ptr()); } while(0)
 #else
+#define LOGV(...)                        ((void)0)
 #define LOGT_PY_TO_JNI(cls, meth)        ((void)0)
 #define LOGT_JNI_TO_PY(cls, meth, ret)   ((void)0)
 #define LOGT_JNICALL_IN(cls, meth)       ((void)0)
@@ -664,32 +665,39 @@ def null_return(ret_decl: str) -> str:
 # Exception Propagation Generator
 # =============================================================================
 
+# def emit_exception_check(lines: list, indent: str = "    ",
+#                           ret_decl: str = "void") -> None:
+#     lines += [
+#         f"{indent}if (env->ExceptionCheck()) {{",
+#         f"{indent}    jthrowable _ex = env->ExceptionOccurred();",
+#         f"{indent}    env->ExceptionClear();",
+#         f"{indent}    std::string _smsg = \"Java exception\";",
+#         f"{indent}    if (_ex) {{",
+#         f"{indent}        jclass _ecls = env->GetObjectClass(_ex);",
+#         f"{indent}        jmethodID _emid = env->GetMethodID("
+#         f"_ecls, \"getMessage\", \"()Ljava/lang/String;\");",
+#         f"{indent}        if (_emid) {{",
+#         f"{indent}            jstring _jm = (jstring)env->CallObjectMethod(_ex, _emid);",
+#         f"{indent}            if (_jm) {{",
+#         f"{indent}                const char* _cm = env->GetStringUTFChars(_jm, nullptr);",
+#         f"{indent}                _smsg = _cm;",
+#         f"{indent}                env->ReleaseStringUTFChars(_jm, _cm);",
+#         f"{indent}                env->DeleteLocalRef(_jm);",
+#         f"{indent}            }}",
+#         f"{indent}        }}",
+#         f"{indent}        env->DeleteLocalRef(_ecls);",
+#         f"{indent}        env->DeleteLocalRef(_ex);",
+#         f"{indent}    }}",
+#         f"{indent}    LOGE(\"Java exception caught: %s\", _smsg.c_str());",
+#         f"{indent}    throw std::runtime_error(_smsg);",
+#         f"{indent}}}",
+#     ]
+
 def emit_exception_check(lines: list, indent: str = "    ",
                           ret_decl: str = "void") -> None:
+    # [OPT] Delegate to bridge_core helper — throws std::runtime_error on exception
     lines += [
-        f"{indent}if (env->ExceptionCheck()) {{",
-        f"{indent}    jthrowable _ex = env->ExceptionOccurred();",
-        f"{indent}    env->ExceptionClear();",
-        f"{indent}    std::string _smsg = \"Java exception\";",
-        f"{indent}    if (_ex) {{",
-        f"{indent}        jclass _ecls = env->GetObjectClass(_ex);",
-        f"{indent}        jmethodID _emid = env->GetMethodID("
-        f"_ecls, \"getMessage\", \"()Ljava/lang/String;\");",
-        f"{indent}        if (_emid) {{",
-        f"{indent}            jstring _jm = (jstring)env->CallObjectMethod(_ex, _emid);",
-        f"{indent}            if (_jm) {{",
-        f"{indent}                const char* _cm = env->GetStringUTFChars(_jm, nullptr);",
-        f"{indent}                _smsg = _cm;",
-        f"{indent}                env->ReleaseStringUTFChars(_jm, _cm);",
-        f"{indent}                env->DeleteLocalRef(_jm);",
-        f"{indent}            }}",
-        f"{indent}        }}",
-        f"{indent}        env->DeleteLocalRef(_ecls);",
-        f"{indent}        env->DeleteLocalRef(_ex);",
-        f"{indent}    }}",
-        f"{indent}    LOGE(\"Java exception caught: %s\", _smsg.c_str());",
-        f"{indent}    throw std::runtime_error(_smsg);",
-        f"{indent}}}",
+        f"{indent}stratum_check_java_exc(env);",
     ]
 
 
@@ -709,45 +717,9 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
     # [A38] Varargs — packed as Python args tuple → jobjectArray
     if p.get("is_varargs", False):
         lines += [
-            f"{indent}// [A38] Varargs packing",
-            f"{indent}jsize _varargs_len = (jsize)nb::len({name});",
-            f"{indent}jobjectArray jni_{name} = env->NewObjectArray(",
-            f"{indent}    _varargs_len, g_object_class, nullptr);",
-            f"{indent}for (jsize _vi = 0; _vi < _varargs_len; ++_vi) {{",
-            f"{indent}    auto _vitem = {name}[_vi];",
-            f"{indent}    jobject _vjobj = nullptr;",
-            f"{indent}    if (nb::isinstance<nb::str>(_vitem)) {{",
-            f"{indent}        // [PATCH-2B] UTF-8→UTF-16→NewString for varargs",
-            f"{indent}        std::string _va = nb::cast<std::string>(_vitem);",
-            f"{indent}        const uint8_t* _vub = reinterpret_cast<const uint8_t*>(_va.data());",
-            f"{indent}        size_t _vul = _va.size(); std::u16string _vu16; _vu16.reserve(_vul);",
-            f"{indent}        for (size_t _vui = 0; _vui < _vul; ) {{",
-            f"{indent}            uint32_t _vcp2; uint8_t _vb0 = _vub[_vui];",
-            f"{indent}            if (_vb0 < 0x80u) {{ _vcp2 = _vb0; _vui += 1; }}",
-            f"{indent}            else if ((_vb0&0xE0u)==0xC0u && _vui+1<_vul) {{ _vcp2=((uint32_t)(_vb0&0x1Fu)<<6)|(_vub[_vui+1]&0x3Fu); _vui+=2; }}",
-            f"{indent}            else if ((_vb0&0xF0u)==0xE0u && _vui+2<_vul) {{ _vcp2=((uint32_t)(_vb0&0x0Fu)<<12)|((uint32_t)(_vub[_vui+1]&0x3Fu)<<6)|(_vub[_vui+2]&0x3Fu); _vui+=3; }}",
-            f"{indent}            else if ((_vb0&0xF8u)==0xF0u && _vui+3<_vul) {{ _vcp2=((uint32_t)(_vb0&0x07u)<<18)|((uint32_t)(_vub[_vui+1]&0x3Fu)<<12)|((uint32_t)(_vub[_vui+2]&0x3Fu)<<6)|(_vub[_vui+3]&0x3Fu); _vui+=4; }}",
-            f"{indent}            else {{ ++_vui; continue; }}",
-            f"{indent}            if (_vcp2 < 0x10000u) {{ _vu16 += (char16_t)_vcp2; }}",
-            f"{indent}            else if (_vcp2 < 0x110000u) {{ _vcp2 -= 0x10000u; _vu16 += (char16_t)(0xD800u|(_vcp2>>10)); _vu16 += (char16_t)(0xDC00u|(_vcp2&0x3FFu)); }}",
-            f"{indent}        }}",
-            f"{indent}        _vjobj = env->NewString(reinterpret_cast<const jchar*>(_vu16.data()), (jsize)_vu16.size());",
-            f"{indent}    }}",
-            f"{indent}    else if (nb::isinstance<StratumObject>(_vitem))",
-            f"{indent}        _vjobj = nb::cast<StratumObject*>(_vitem)->obj_;",
-            f"{indent}    else if (nb::isinstance<nb::int_>(_vitem)) {{",
-            f"{indent}        // box int to Integer",
-            f"{indent}        static jclass _intcls = nullptr;",
-            f"{indent}        static jmethodID _intvalof = nullptr;",
-            f"{indent}        if (!_intcls) {{ jclass _c = env->FindClass(\"java/lang/Integer\");",
-            f"{indent}            _intcls = (jclass)env->NewGlobalRef(_c); env->DeleteLocalRef(_c); }}",
-            f"{indent}        if (!_intvalof) _intvalof = env->GetStaticMethodID(_intcls, \"valueOf\", \"(I)Ljava/lang/Integer;\");",
-            f"{indent}        _vjobj = env->CallStaticObjectMethod(_intcls, _intvalof, (jint)nb::cast<long long>(_vitem));",
-            f"{indent}    }}",
-            f"{indent}    env->SetObjectArrayElement(jni_{name}, _vi, _vjobj);",
-            f"{indent}    if (_vjobj && nb::isinstance<nb::str>(_vitem)) env->DeleteLocalRef(_vjobj);",
-            f"{indent}}}",
-            f"{indent}LOGV_INT(\"varargs_len\", (int64_t)_varargs_len);",
+            f"{indent}// [OPT] Varargs packing via stratum_pack_varargs helper",
+            f"{indent}jobjectArray jni_{name} = stratum_pack_varargs(env, {name});",
+            f"{indent}LOGV_INT(\"varargs_len\", (int64_t)nb::len({name}));",
         ]
         return
     
@@ -785,32 +757,9 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
     # [Action8] CharSequence → string
     if is_charsequence_param(p):
         lines += [
-            f"{indent}// [PATCH-UTF8-IN] CharSequence: UTF-8→UTF-16→NewString, not NewStringUTF",
-            f"{indent}jstring jni_{name};",
-            f"{indent}{{",
-            f"{indent}    const uint8_t* _ub = reinterpret_cast<const uint8_t*>({name}.data());",
-            f"{indent}    size_t _ul = {name}.size();",
-            f"{indent}    std::u16string _u16;",
-            f"{indent}    _u16.reserve(_ul);",
-            f"{indent}    for (size_t _ui = 0; _ui < _ul; ) {{",
-            f"{indent}        uint32_t _cp = 0;",
-            f"{indent}        uint8_t _b0 = _ub[_ui];",
-            f"{indent}        if (_b0 < 0x80u)                              {{ _cp = _b0; _ui += 1; }}",
-            f"{indent}        else if ((_b0 & 0xE0u) == 0xC0u && _ui+1 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x1Fu) << 6)  | (_ub[_ui+1] & 0x3Fu); _ui += 2; }}",
-            f"{indent}        else if ((_b0 & 0xF0u) == 0xE0u && _ui+2 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x0Fu) << 12) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 6) | (_ub[_ui+2] & 0x3Fu); _ui += 3; }}",
-            f"{indent}        else if ((_b0 & 0xF8u) == 0xF0u && _ui+3 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x07u) << 18) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 12) | ((uint32_t)(_ub[_ui+2] & 0x3Fu) << 6) | (_ub[_ui+3] & 0x3Fu); _ui += 4; }}",
-            f"{indent}        else {{ ++_ui; continue; }}",
-            f"{indent}        if (_cp < 0x10000u) {{ _u16 += (char16_t)_cp; }}",
-            f"{indent}        else if (_cp < 0x110000u) {{",
-            f"{indent}            _cp -= 0x10000u;",
-            f"{indent}            _u16 += (char16_t)(0xD800u | (_cp >> 10));",
-            f"{indent}            _u16 += (char16_t)(0xDC00u | (_cp & 0x3FFu));",
-            f"{indent}        }}",
-            f"{indent}    }}",
-            f"{indent}    jni_{name} = env->NewString(",
-            f"{indent}        reinterpret_cast<const jchar*>(_u16.data()), (jsize)_u16.size());",
-            f"{indent}}}",
-            f"{indent}LOGD(\"param {name} (CharSequence→utf16 jstring) = %s\", {name}.c_str());",
+            f"{indent}// [OPT] CharSequence UTF-8→UTF-16 via stratum_str_to_jstring",
+            f"{indent}jstring jni_{name} = stratum_str_to_jstring(env, {name});",
+            f"{indent}LOGD(\"param {name} (CharSequence→jstring) = %s\", {name}.c_str());",
             f"{indent}LOGV_STR(\"{name}\", {name});",
         ]
         return
@@ -825,59 +774,11 @@ def emit_param_conversion(p: dict, mi: int, lines: list,
 
     elif conv == "string_in" or jtype == "jstring":
         lines += [
-            f"{indent}// [PATCH-UTF8-IN] NewStringUTF expects MUTF-8, breaks emoji from Python",
-            f"{indent}// Convert Python UTF-8 → UTF-16 → NewString() instead",
-            f"{indent}jstring jni_{name};",
-            f"{indent}{{",
-            f"{indent}    const uint8_t* _ub = reinterpret_cast<const uint8_t*>({name}.data());",
-            f"{indent}    size_t _ul = {name}.size();",
-            f"{indent}    std::u16string _u16;",
-            f"{indent}    _u16.reserve(_ul);",
-            f"{indent}    for (size_t _ui = 0; _ui < _ul; ) {{",
-            f"{indent}        uint32_t _cp = 0;",
-            f"{indent}        uint8_t _b0 = _ub[_ui];",
-            f"{indent}        if (_b0 < 0x80u)                              {{ _cp = _b0; _ui += 1; }}",
-            f"{indent}        else if ((_b0 & 0xE0u) == 0xC0u && _ui+1 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x1Fu) << 6)  | (_ub[_ui+1] & 0x3Fu); _ui += 2; }}",
-            f"{indent}        else if ((_b0 & 0xF0u) == 0xE0u && _ui+2 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x0Fu) << 12) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 6) | (_ub[_ui+2] & 0x3Fu); _ui += 3; }}",
-            f"{indent}        else if ((_b0 & 0xF8u) == 0xF0u && _ui+3 < _ul) {{ _cp = ((uint32_t)(_b0 & 0x07u) << 18) | ((uint32_t)(_ub[_ui+1] & 0x3Fu) << 12) | ((uint32_t)(_ub[_ui+2] & 0x3Fu) << 6) | (_ub[_ui+3] & 0x3Fu); _ui += 4; }}",
-            f"{indent}        else {{ ++_ui; continue; }}",
-            f"{indent}        if (_cp < 0x10000u) {{ _u16 += (char16_t)_cp; }}",
-            f"{indent}        else if (_cp < 0x110000u) {{",
-            f"{indent}            _cp -= 0x10000u;",
-            f"{indent}            _u16 += (char16_t)(0xD800u | (_cp >> 10));",
-            f"{indent}            _u16 += (char16_t)(0xDC00u | (_cp & 0x3FFu));",
-            f"{indent}        }}",
-            f"{indent}    }}",
-            f"{indent}    jni_{name} = env->NewString(",
-            f"{indent}        reinterpret_cast<const jchar*>(_u16.data()), (jsize)_u16.size());",
-            f"{indent}}}",
-            f"{indent}LOGD(\"param {name} (string→utf16 jstring) = %s\", {name}.c_str());",
+            f"{indent}// [OPT] UTF-8→UTF-16 via stratum_str_to_jstring helper",
+            f"{indent}jstring jni_{name} = stratum_str_to_jstring(env, {name});",
+            f"{indent}LOGD(\"param {name} (string→jstring) = %s\", {name}.c_str());",
             f"{indent}LOGV_STR(\"{name}\", {name});",
         ]
-    # below -------- ----- this two elif not used --- more like dead condition code
-
-
-    # elif conv == "abstract_adapter":
-    #     lines.append(
-    #         f"{indent}jobject jni_{name} = "
-    #         f"create_proxy_m{mi}_{name}(env, {name});")
-    #     lines.append(
-    #         f"{indent}LOGD(\"param {name} (abstract adapter) = %p\", jni_{name});")
-    #     lines.append(
-    #         f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
-
-    # elif conv == "callable_to_proxy":
-    #     lines.append(
-    #         f"{indent}jobject jni_{name} = "
-    #         f"create_proxy_m{mi}_{name}(env, {name});")
-    #     lines.append(
-    #         f"{indent}LOGD(\"param {name} (proxy) created = %p\", jni_{name});")
-    #     lines.append(
-    #         f"{indent}LOGV_PTR(\"{name}\", jni_{name});")
-
-
-
-    #----------------------------------------------------------------------
 
     elif java_type and java_type in GENERATED_FQNS:
         lines.append(
@@ -1073,53 +974,36 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
         ]
 
     elif ret_decl == "std::string" or is_string_return(m):
-        lines += [
-            f"{indent}if (!raw) {{ LOGD(\"return string = null\"); "
-            f"LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string(null)\"); return \"\"; }}",
-            f"{indent}// [PATCH-UTF8-RET] GetStringChars (UTF-16) → standard UTF-8",
-            f"{indent}// GetStringUTFChars returns MUTF-8 which breaks emoji in Python",
-            f"{indent}{{",
-            f"{indent}    jsize _slen = env->GetStringLength((jstring)raw);",
-            f"{indent}    const jchar* _sjc = env->GetStringChars((jstring)raw, nullptr);",
-            f"{indent}    std::string _res;",
-            f"{indent}    if (_sjc && _slen > 0) {{",
-            f"{indent}        _res.reserve((size_t)_slen * 3);",
-            f"{indent}        for (jsize _si = 0; _si < _slen; ) {{",
-            f"{indent}            uint32_t _cp;",
-            f"{indent}            uint16_t _c1 = (uint16_t)_sjc[_si++];",
-            f"{indent}            if (_c1 >= 0xD800u && _c1 <= 0xDBFFu && _si < _slen) {{",
-            f"{indent}                uint16_t _c2 = (uint16_t)_sjc[_si];",
-            f"{indent}                if (_c2 >= 0xDC00u && _c2 <= 0xDFFFu) {{",
-            f"{indent}                    _cp = 0x10000u + (((uint32_t)(_c1 - 0xD800u)) << 10)",
-            f"{indent}                               + (uint32_t)(_c2 - 0xDC00u);",
-            f"{indent}                    ++_si;",
-            f"{indent}                }} else {{ _cp = _c1; }}",
-            f"{indent}            }} else {{ _cp = _c1; }}",
-            f"{indent}            if (_cp < 0x80u) {{",
-            f"{indent}                _res += (char)_cp;",
-            f"{indent}            }} else if (_cp < 0x800u) {{",
-            f"{indent}                _res += (char)(0xC0u | (_cp >> 6));",
-            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
-            f"{indent}            }} else if (_cp < 0x10000u) {{",
-            f"{indent}                _res += (char)(0xE0u | (_cp >> 12));",
-            f"{indent}                _res += (char)(0x80u | ((_cp >> 6) & 0x3Fu));",
-            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
-            f"{indent}            }} else {{",
-            f"{indent}                _res += (char)(0xF0u | (_cp >> 18));",
-            f"{indent}                _res += (char)(0x80u | ((_cp >> 12) & 0x3Fu));",
-            f"{indent}                _res += (char)(0x80u | ((_cp >> 6)  & 0x3Fu));",
-            f"{indent}                _res += (char)(0x80u | (_cp & 0x3Fu));",
-            f"{indent}            }}",
-            f"{indent}        }}",
-            f"{indent}    }}",
-            f"{indent}    if (_sjc) env->ReleaseStringChars((jstring)raw, _sjc);",
-            f"{indent}    env->DeleteLocalRef((jobject)raw);",
-            f"{indent}    LOGD(\"return string(utf16) len=%d\", (int)_slen);",
-            f"{indent}    LOGV_RET_STR(\"{mname}\", _res);",
-            f"{indent}    LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string(utf16)\");",
-            f"{indent}    return _res;",
-            f"{indent}}}",
-        ]
+        if get_return_jni(m) == "jchar":
+            # jchar path stays inline — it's small and unique
+            lines += [
+                f"{indent}// [A37] jchar return → single Python str char",
+                f"{indent}std::string _cres;",
+                f"{indent}uint16_t _cval = (uint16_t)(jchar)raw;",
+                f"{indent}if (_cval < 0x80) {{ _cres += (char)_cval; }}",
+                f"{indent}else if (_cval < 0x800) {{",
+                f"{indent}    _cres += (char)(0xC0 | (_cval >> 6));",
+                f"{indent}    _cres += (char)(0x80 | (_cval & 0x3F));",
+                f"{indent}}} else {{",
+                f"{indent}    _cres += (char)(0xE0 | (_cval >> 12));",
+                f"{indent}    _cres += (char)(0x80 | ((_cval >> 6) & 0x3F));",
+                f"{indent}    _cres += (char)(0x80 | (_cval & 0x3F));",
+                f"{indent}}}",
+                f"{indent}LOGV_RET_STR(\"{mname}\", _cres);",
+                f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"jchar->str\");",
+                f"{indent}return _cres;",
+            ]
+        else:
+            lines += [
+                f"{indent}// [OPT] UTF-16→UTF-8 via stratum_jstring_to_str helper",
+                f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string(null)\"); return \"\"; }}",
+                f"{indent}{{",
+                f"{indent}    std::string _res = stratum_jstring_to_str(env, (jobject)raw);",
+                f"{indent}    LOGV_RET_STR(\"{mname}\", _res);",
+                f"{indent}    LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string\");",
+                f"{indent}    return _res;",
+                f"{indent}}}",
+            ]
 
     elif ret_decl == "nb::bytes" or ret_sig == "[B":
         lines += [
@@ -1160,322 +1044,44 @@ def emit_return_conversion(ret_decl: str, ret_conv: str, lines: list,
     elif is_string_array_sig(ret_sig):
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string[](null)\"); return nb::list(); }}",
-            f"{indent}jobjectArray _sarr = (jobjectArray)raw;",
-            f"{indent}jsize _slen = env->GetArrayLength(_sarr);",
-            f"{indent}nb::list _slist;",
-            f"{indent}for (jsize _i = 0; _i < _slen; ++_i) {{",
-            f"{indent}    jstring _s = "
-            f"(jstring)env->GetObjectArrayElement(_sarr, _i);",
-            f"{indent}    if (_s) {{",
-            f"{indent}        // [PATCH-1A] UTF-16→UTF-8 for emoji safety",
-            f"{indent}        jsize _sl = env->GetStringLength(_s);",
-            f"{indent}        const jchar* _sc = env->GetStringChars(_s, nullptr);",
-            f"{indent}        std::string _sr;",
-            f"{indent}        if (_sc && _sl > 0) {{",
-            f"{indent}            _sr.reserve((size_t)_sl * 3);",
-            f"{indent}            for (jsize _si = 0; _si < _sl; ) {{",
-            f"{indent}                uint32_t _cp; uint16_t _c1 = (uint16_t)_sc[_si++];",
-            f"{indent}                if (_c1 >= 0xD800u && _c1 <= 0xDBFFu && _si < _sl) {{",
-            f"{indent}                    uint16_t _c2 = (uint16_t)_sc[_si];",
-            f"{indent}                    if (_c2 >= 0xDC00u && _c2 <= 0xDFFFu) {{ _cp = 0x10000u + (((uint32_t)(_c1-0xD800u))<<10)+(uint32_t)(_c2-0xDC00u); ++_si; }}",
-            f"{indent}                    else {{ _cp = _c1; }}",
-            f"{indent}                }} else {{ _cp = _c1; }}",
-            f"{indent}                if (_cp < 0x80u) {{ _sr += (char)_cp; }}",
-            f"{indent}                else if (_cp < 0x800u) {{ _sr += (char)(0xC0u|(_cp>>6)); _sr += (char)(0x80u|(_cp&0x3Fu)); }}",
-            f"{indent}                else if (_cp < 0x10000u) {{ _sr += (char)(0xE0u|(_cp>>12)); _sr += (char)(0x80u|((_cp>>6)&0x3Fu)); _sr += (char)(0x80u|(_cp&0x3Fu)); }}",
-            f"{indent}                else {{ _sr += (char)(0xF0u|(_cp>>18)); _sr += (char)(0x80u|((_cp>>12)&0x3Fu)); _sr += (char)(0x80u|((_cp>>6)&0x3Fu)); _sr += (char)(0x80u|(_cp&0x3Fu)); }}",
-            f"{indent}            }}",
-            f"{indent}        }}",
-            f"{indent}        if (_sc) env->ReleaseStringChars(_s, _sc);",
-            f"{indent}        _slist.append(nb::str(_sr.c_str()));",
-            f"{indent}        env->DeleteLocalRef(_s);",
-            f"{indent}    }} else _slist.append(nb::none());",
-            f"{indent}}}",
-            f"{indent}env->DeleteLocalRef(_sarr);",
-            f"{indent}LOGD(\"return string[] len=%d\", _slen);",
-            f"{indent}LOGV_RET_INT(\"{mname}\", (int64_t)_slen);",
+            f"{indent}// [OPT] String[] → list via stratum_string_array_to_list",
             f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"string[]\");",
-            f"{indent}return _slist;",
+            f"{indent}return stratum_string_array_to_list(env, raw);",
         ]
 
     elif ret_sig.startswith("["):
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"object[](null)\"); return nb::list(); }}",
-            f"{indent}jobjectArray _oarr = (jobjectArray)raw;",
-            f"{indent}jsize _olen = env->GetArrayLength(_oarr);",
-            f"{indent}nb::list _olist;",
-            f"{indent}for (jsize _i = 0; _i < _olen; ++_i) {{",
-            f"{indent}    jobject _elem = "
-            f"env->GetObjectArrayElement(_oarr, _i);",
-            f"{indent}    if (_elem) {{",
-            f"{indent}        jobject _gelem = env->NewGlobalRef(_elem);",
-            f"{indent}        env->DeleteLocalRef(_elem);",
-            f"{indent}        _olist.append(nb::cast("
-            f"new StratumObject(_gelem),",
-            f"{indent}                               "
-            f"nb::rv_policy::take_ownership));",
-            f"{indent}    }} else _olist.append(nb::none());",
-            f"{indent}}}",
-            f"{indent}env->DeleteLocalRef(_oarr);",
-            f"{indent}LOGD(\"return object[] len=%d\", _olen);",
-            f"{indent}LOGV_RET_INT(\"{mname}\", (int64_t)_olen);",
+            f"{indent}// [OPT] Object[] → list via stratum_jobject_array_to_list",
             f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"object[]\");",
-            f"{indent}return _olist;",
+            f"{indent}return stratum_jobject_array_to_list(env, (jobjectArray)raw);",
         ]
 
     # [A14] Collection return → nb::list
     elif ret_decl == "nb::list":
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"list(null)\"); return nb::list(); }}",
-            f"{indent}// [A14] Convert Java Collection to Python list",
-            f"{indent}nb::list _coll_list;",
-            f"{indent}{{",
-            f"{indent}    jclass _lcls = env->GetObjectClass(raw);",
-            f"{indent}    jmethodID _lsize = env->GetMethodID(_lcls, \"size\", \"()I\");",
-            f"{indent}    jmethodID _lget = env->GetMethodID(_lcls, \"get\", \"(I)Ljava/lang/Object;\");",
-            f"{indent}    if (_lsize && _lget) {{",
-            f"{indent}        jint _llen = env->CallIntMethod(raw, _lsize);",
-            f"{indent}        LOGD(\"Collection size=%d\", _llen);",
-            f"{indent}        for (jint _li = 0; _li < _llen; ++_li) {{",
-            f"{indent}            jobject _litem = env->CallObjectMethod(raw, _lget, _li);",
-            f"{indent}            if (!_litem) {{ _coll_list.append(nb::none()); continue; }}",
-            f"{indent}            if (g_jstring_class && env->IsInstanceOf(_litem, g_jstring_class)) {{",
-            f"{indent}                // [PATCH-1B] UTF-16→UTF-8",
-            f"{indent}                jstring _ljs = (jstring)_litem;",
-            f"{indent}                jsize _lsl = env->GetStringLength(_ljs);",
-            f"{indent}                const jchar* _lsc = env->GetStringChars(_ljs, nullptr);",
-            f"{indent}                std::string _lsr;",
-            f"{indent}                if (_lsc && _lsl > 0) {{",
-            f"{indent}                    _lsr.reserve((size_t)_lsl * 3);",
-            f"{indent}                    for (jsize _lsi = 0; _lsi < _lsl; ) {{",
-            f"{indent}                        uint32_t _lcp; uint16_t _lc1 = (uint16_t)_lsc[_lsi++];",
-            f"{indent}                        if (_lc1 >= 0xD800u && _lc1 <= 0xDBFFu && _lsi < _lsl) {{",
-            f"{indent}                            uint16_t _lc2 = (uint16_t)_lsc[_lsi];",
-            f"{indent}                            if (_lc2 >= 0xDC00u && _lc2 <= 0xDFFFu) {{ _lcp = 0x10000u+(((uint32_t)(_lc1-0xD800u))<<10)+(uint32_t)(_lc2-0xDC00u); ++_lsi; }}",
-            f"{indent}                            else {{ _lcp = _lc1; }}",
-            f"{indent}                        }} else {{ _lcp = _lc1; }}",
-            f"{indent}                        if (_lcp < 0x80u) {{ _lsr += (char)_lcp; }}",
-            f"{indent}                        else if (_lcp < 0x800u) {{ _lsr += (char)(0xC0u|(_lcp>>6)); _lsr += (char)(0x80u|(_lcp&0x3Fu)); }}",
-            f"{indent}                        else if (_lcp < 0x10000u) {{ _lsr += (char)(0xE0u|(_lcp>>12)); _lsr += (char)(0x80u|((_lcp>>6)&0x3Fu)); _lsr += (char)(0x80u|(_lcp&0x3Fu)); }}",
-            f"{indent}                        else {{ _lsr += (char)(0xF0u|(_lcp>>18)); _lsr += (char)(0x80u|((_lcp>>12)&0x3Fu)); _lsr += (char)(0x80u|((_lcp>>6)&0x3Fu)); _lsr += (char)(0x80u|(_lcp&0x3Fu)); }}",
-            f"{indent}                    }}",
-            f"{indent}                }}",
-            f"{indent}                if (_lsc) env->ReleaseStringChars(_ljs, _lsc);",
-            f"{indent}                _coll_list.append(nb::str(_lsr.c_str()));",
-            f"{indent}                env->DeleteLocalRef(_litem);",
-            f"{indent}            }} else {{",
-            f"{indent}                jobject _lgref = env->NewGlobalRef(_litem);",
-            f"{indent}                env->DeleteLocalRef(_litem);",
-            f"{indent}                _coll_list.append(nb::cast(new StratumObject(_lgref), nb::rv_policy::take_ownership));",
-            f"{indent}            }}",
-            f"{indent}        }}",
-            f"{indent}    }} else {{",
-            f"{indent}        // [PATCH-3] No get(int) — use Iterator for Set/Queue/LinkedList",
-            f"{indent}        env->ExceptionClear();",
-            f"{indent}        jclass _icls2 = env->GetObjectClass(raw);",
-            f"{indent}        jmethodID _iiter = env->GetMethodID(_icls2, \"iterator\", \"()Ljava/util/Iterator;\");",
-            f"{indent}        env->DeleteLocalRef(_icls2);",
-            f"{indent}        if (_iiter) {{",
-            f"{indent}            jobject _iter2 = env->CallObjectMethod(raw, _iiter);",
-            f"{indent}            if (_iter2) {{",
-            f"{indent}                jclass _ic2 = env->GetObjectClass(_iter2);",
-            f"{indent}                jmethodID _ihn = env->GetMethodID(_ic2, \"hasNext\", \"()Z\");",
-            f"{indent}                jmethodID _inx = env->GetMethodID(_ic2, \"next\", \"()Ljava/lang/Object;\");",
-            f"{indent}                env->DeleteLocalRef(_ic2);",
-            f"{indent}                while (_ihn && _inx && env->CallBooleanMethod(_iter2, _ihn)) {{",
-            f"{indent}                    jobject _ie = env->CallObjectMethod(_iter2, _inx);",
-            f"{indent}                    if (!_ie) {{ _coll_list.append(nb::none()); continue; }}",
-            f"{indent}                    if (g_jstring_class && env->IsInstanceOf(_ie, g_jstring_class)) {{",
-            f"{indent}                        jsize _isl = env->GetStringLength((jstring)_ie);",
-            f"{indent}                        const jchar* _isc = env->GetStringChars((jstring)_ie, nullptr);",
-            f"{indent}                        std::string _isr;",
-            f"{indent}                        if (_isc && _isl > 0) {{",
-            f"{indent}                            _isr.reserve((size_t)_isl * 3);",
-            f"{indent}                            for (jsize _isi = 0; _isi < _isl; ) {{",
-            f"{indent}                                uint32_t _icp; uint16_t _ic1 = (uint16_t)_isc[_isi++];",
-            f"{indent}                                if (_ic1 >= 0xD800u && _ic1 <= 0xDBFFu && _isi < _isl) {{",
-            f"{indent}                                    uint16_t _ic2x = (uint16_t)_isc[_isi];",
-            f"{indent}                                    if (_ic2x >= 0xDC00u && _ic2x <= 0xDFFFu) {{ _icp = 0x10000u+(((uint32_t)(_ic1-0xD800u))<<10)+(uint32_t)(_ic2x-0xDC00u); ++_isi; }}",
-            f"{indent}                                    else {{ _icp = _ic1; }}",
-            f"{indent}                                }} else {{ _icp = _ic1; }}",
-            f"{indent}                                if (_icp < 0x80u) {{ _isr += (char)_icp; }}",
-            f"{indent}                                else if (_icp < 0x800u) {{ _isr += (char)(0xC0u|(_icp>>6)); _isr += (char)(0x80u|(_icp&0x3Fu)); }}",
-            f"{indent}                                else if (_icp < 0x10000u) {{ _isr += (char)(0xE0u|(_icp>>12)); _isr += (char)(0x80u|((_icp>>6)&0x3Fu)); _isr += (char)(0x80u|(_icp&0x3Fu)); }}",
-            f"{indent}                                else {{ _isr += (char)(0xF0u|(_icp>>18)); _isr += (char)(0x80u|((_icp>>12)&0x3Fu)); _isr += (char)(0x80u|((_icp>>6)&0x3Fu)); _isr += (char)(0x80u|(_icp&0x3Fu)); }}",
-            f"{indent}                            }}",
-            f"{indent}                        }}",
-            f"{indent}                        if (_isc) env->ReleaseStringChars((jstring)_ie, _isc);",
-            f"{indent}                        _coll_list.append(nb::str(_isr.c_str()));",
-            f"{indent}                        env->DeleteLocalRef(_ie);",
-            f"{indent}                    }} else {{",
-            f"{indent}                        jobject _igref = env->NewGlobalRef(_ie);",
-            f"{indent}                        env->DeleteLocalRef(_ie);",
-            f"{indent}                        _coll_list.append(nb::cast(new StratumObject(_igref), nb::rv_policy::take_ownership));",
-            f"{indent}                    }}",
-            f"{indent}                }}",
-            f"{indent}                env->DeleteLocalRef(_iter2);",
-            f"{indent}            }}",
-            f"{indent}        }} else {{",
-            f"{indent}            env->ExceptionClear();",
-            f"{indent}            jobject _lgref = env->NewGlobalRef(raw);",
-            f"{indent}            _coll_list.append(nb::cast(new StratumObject(_lgref), nb::rv_policy::take_ownership));",
-            f"{indent}        }}",
-            f"{indent}        env->DeleteLocalRef(raw);",
-            f"{indent}    }}",
-            f"{indent}    env->DeleteLocalRef(_lcls);",
-            f"{indent}    env->DeleteLocalRef(raw);",
-            f"{indent}}}",
+            f"{indent}// [OPT] Java Collection → Python list via stratum_collection_to_list",
             f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"list\");",
-            f"{indent}return _coll_list;",
+            f"{indent}return stratum_collection_to_list(env, raw);",
         ]
 
     # [A14] Map return → nb::dict
     elif ret_decl == "nb::dict":
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"dict(null)\"); return nb::dict(); }}",
-            f"{indent}// [A14] Convert Java Map to Python dict",
-            f"{indent}nb::dict _map_dict;",
-            f"{indent}{{",
-            f"{indent}    jclass _mcls = env->GetObjectClass(raw);",
-            f"{indent}    jmethodID _mentrySet = env->GetMethodID(_mcls, \"entrySet\", \"()Ljava/util/Set;\");",
-            f"{indent}    env->DeleteLocalRef(_mcls);",
-            f"{indent}    if (_mentrySet) {{",
-            f"{indent}        jobject _es = env->CallObjectMethod(raw, _mentrySet);",
-            f"{indent}        jclass _escls = env->GetObjectClass(_es);",
-            f"{indent}        jmethodID _esiter = env->GetMethodID(_escls, \"iterator\", \"()Ljava/util/Iterator;\");",
-            f"{indent}        env->DeleteLocalRef(_escls);",
-            f"{indent}        jobject _iter = env->CallObjectMethod(_es, _esiter);",
-            f"{indent}        env->DeleteLocalRef(_es);",
-            f"{indent}        jclass _icls = env->GetObjectClass(_iter);",
-            f"{indent}        jmethodID _ihasNext = env->GetMethodID(_icls, \"hasNext\", \"()Z\");",
-            f"{indent}        jmethodID _inext = env->GetMethodID(_icls, \"next\", \"()Ljava/lang/Object;\");",
-            f"{indent}        env->DeleteLocalRef(_icls);",
-            f"{indent}        while (env->CallBooleanMethod(_iter, _ihasNext)) {{",
-            f"{indent}            jobject _entry = env->CallObjectMethod(_iter, _inext);",
-            f"{indent}            jclass _ecls2 = env->GetObjectClass(_entry);",
-            f"{indent}            jmethodID _ekey = env->GetMethodID(_ecls2, \"getKey\", \"()Ljava/lang/Object;\");",
-            f"{indent}            jmethodID _eval = env->GetMethodID(_ecls2, \"getValue\", \"()Ljava/lang/Object;\");",
-            f"{indent}            env->DeleteLocalRef(_ecls2);",
-            f"{indent}            jobject _ek = env->CallObjectMethod(_entry, _ekey);",
-            f"{indent}            jobject _ev = env->CallObjectMethod(_entry, _eval);",
-            f"{indent}            env->DeleteLocalRef(_entry);",
-            f"{indent}            nb::object _pyk, _pyv;",
-            f"{indent}            if (_ek && g_jstring_class && env->IsInstanceOf(_ek, g_jstring_class)) {{",
-            f"{indent}                // [PATCH-1C] UTF-16→UTF-8 map key",
-            f"{indent}                jsize _kl = env->GetStringLength((jstring)_ek);",
-            f"{indent}                const jchar* _kc16 = env->GetStringChars((jstring)_ek, nullptr);",
-            f"{indent}                std::string _ks;",
-            f"{indent}                if (_kc16 && _kl > 0) {{",
-            f"{indent}                    _ks.reserve((size_t)_kl * 3);",
-            f"{indent}                    for (jsize _ki2 = 0; _ki2 < _kl; ) {{",
-            f"{indent}                        uint32_t _kcp; uint16_t _kc1 = (uint16_t)_kc16[_ki2++];",
-            f"{indent}                        if (_kc1 >= 0xD800u && _kc1 <= 0xDBFFu && _ki2 < _kl) {{",
-            f"{indent}                            uint16_t _kc2 = (uint16_t)_kc16[_ki2];",
-            f"{indent}                            if (_kc2 >= 0xDC00u && _kc2 <= 0xDFFFu) {{ _kcp = 0x10000u+(((uint32_t)(_kc1-0xD800u))<<10)+(uint32_t)(_kc2-0xDC00u); ++_ki2; }}",
-            f"{indent}                            else {{ _kcp = _kc1; }}",
-            f"{indent}                        }} else {{ _kcp = _kc1; }}",
-            f"{indent}                        if (_kcp < 0x80u) {{ _ks += (char)_kcp; }}",
-            f"{indent}                        else if (_kcp < 0x800u) {{ _ks += (char)(0xC0u|(_kcp>>6)); _ks += (char)(0x80u|(_kcp&0x3Fu)); }}",
-            f"{indent}                        else if (_kcp < 0x10000u) {{ _ks += (char)(0xE0u|(_kcp>>12)); _ks += (char)(0x80u|((_kcp>>6)&0x3Fu)); _ks += (char)(0x80u|(_kcp&0x3Fu)); }}",
-            f"{indent}                        else {{ _ks += (char)(0xF0u|(_kcp>>18)); _ks += (char)(0x80u|((_kcp>>12)&0x3Fu)); _ks += (char)(0x80u|((_kcp>>6)&0x3Fu)); _ks += (char)(0x80u|(_kcp&0x3Fu)); }}",
-            f"{indent}                    }}",
-            f"{indent}                }}",
-            f"{indent}                if (_kc16) env->ReleaseStringChars((jstring)_ek, _kc16);",
-            f"{indent}                _pyk = nb::str(_ks.c_str());",
-            f"{indent}                env->DeleteLocalRef(_ek);",
-            f"{indent}            }} else if (_ek) {{",
-            f"{indent}                _pyk = nb::cast(new StratumObject(env->NewGlobalRef(_ek)), nb::rv_policy::take_ownership);",
-            f"{indent}                env->DeleteLocalRef(_ek);",
-            f"{indent}            }} else _pyk = nb::none();",
-            f"{indent}            if (_ev) {{",
-            f"{indent}                // [PATCH-4] Check if value is String",
-            f"{indent}                if (g_jstring_class && env->IsInstanceOf(_ev, g_jstring_class)) {{",
-            f"{indent}                    jsize _vl = env->GetStringLength((jstring)_ev);",
-            f"{indent}                    const jchar* _vc16 = env->GetStringChars((jstring)_ev, nullptr);",
-            f"{indent}                    std::string _vs;",
-            f"{indent}                    if (_vc16 && _vl > 0) {{",
-            f"{indent}                        _vs.reserve((size_t)_vl * 3);",
-            f"{indent}                        for (jsize _vi2 = 0; _vi2 < _vl; ) {{",
-            f"{indent}                            uint32_t _vcp; uint16_t _vc1 = (uint16_t)_vc16[_vi2++];",
-            f"{indent}                            if (_vc1 >= 0xD800u && _vc1 <= 0xDBFFu && _vi2 < _vl) {{",
-            f"{indent}                                uint16_t _vc2 = (uint16_t)_vc16[_vi2];",
-            f"{indent}                                if (_vc2 >= 0xDC00u && _vc2 <= 0xDFFFu) {{ _vcp = 0x10000u+(((uint32_t)(_vc1-0xD800u))<<10)+(uint32_t)(_vc2-0xDC00u); ++_vi2; }}",
-            f"{indent}                                else {{ _vcp = _vc1; }}",
-            f"{indent}                            }} else {{ _vcp = _vc1; }}",
-            f"{indent}                            if (_vcp < 0x80u) {{ _vs += (char)_vcp; }}",
-            f"{indent}                            else if (_vcp < 0x800u) {{ _vs += (char)(0xC0u|(_vcp>>6)); _vs += (char)(0x80u|(_vcp&0x3Fu)); }}",
-            f"{indent}                            else if (_vcp < 0x10000u) {{ _vs += (char)(0xE0u|(_vcp>>12)); _vs += (char)(0x80u|((_vcp>>6)&0x3Fu)); _vs += (char)(0x80u|(_vcp&0x3Fu)); }}",
-            f"{indent}                            else {{ _vs += (char)(0xF0u|(_vcp>>18)); _vs += (char)(0x80u|((_vcp>>12)&0x3Fu)); _vs += (char)(0x80u|((_vcp>>6)&0x3Fu)); _vs += (char)(0x80u|(_vcp&0x3Fu)); }}",
-            f"{indent}                        }}",
-            f"{indent}                    }}",
-            f"{indent}                    if (_vc16) env->ReleaseStringChars((jstring)_ev, _vc16);",
-            f"{indent}                    _pyv = nb::str(_vs.c_str());",
-            f"{indent}                    env->DeleteLocalRef(_ev);",
-            f"{indent}                }} else {{",
-            f"{indent}                    _pyv = nb::cast(new StratumObject(env->NewGlobalRef(_ev)), nb::rv_policy::take_ownership);",
-            f"{indent}                    env->DeleteLocalRef(_ev);",
-            f"{indent}                }}",
-            f"{indent}            }} else _pyv = nb::none();",
-            f"{indent}            _map_dict[_pyk] = _pyv;",
-            f"{indent}        }}",
-            f"{indent}        env->DeleteLocalRef(_iter);",
-            f"{indent}    }}",
-            f"{indent}    env->DeleteLocalRef(raw);",
-            f"{indent}}}",
+            f"{indent}// [OPT] Java Map → Python dict via stratum_map_to_dict",
             f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"dict\");",
-            f"{indent}return _map_dict;",
+            f"{indent}return stratum_map_to_dict(env, raw);",
         ]
 
     # [A41] ByteBuffer return — zero-copy direct, or bytes for heap
     elif ret_decl == "nb::object":
         lines += [
             f"{indent}if (!raw) {{ LOGT_JNI_TO_PY(\"\", \"{mname}\", \"bytebuffer(null)\"); return nb::none(); }}",
-            f"{indent}// [A41] ByteBuffer — try direct (zero-copy) first",
-            f"{indent}void* _bb_addr = env->GetDirectBufferAddress(raw);",
-            f"{indent}if (_bb_addr != nullptr) {{",
-            f"{indent}    jlong _bb_cap = env->GetDirectBufferCapacity(raw);",
-            f"{indent}    if (_bb_cap > 0) {{",
-            f"{indent}        LOGD(\"ByteBuffer direct addr=%p cap=%lld\", _bb_addr, (long long)_bb_cap);",
-            f"{indent}        LOGV(\"BYTEBUFFER_DIRECT addr=%p capacity=%lld\", _bb_addr, (long long)_bb_cap);",
-            f"{indent}        // Keep the raw reference alive as a global ref",
-            f"{indent}        jobject _bb_gref = env->NewGlobalRef(raw);",
-            f"{indent}        env->DeleteLocalRef(raw);",
-            f"{indent}        // Create a nanobind capsule that deletes the global ref when Python garbage collects the memoryview",
-            f"{indent}        nb::capsule _owner(_bb_gref, [](void* p) noexcept {{",
-            f"{indent}            JNIEnv* e = get_env_safe();",
-            f"{indent}            if (e) e->DeleteGlobalRef((jobject)p);",
-            f"{indent}        }});",
-            f"{indent}        // Return as mutable memoryview tied to the capsule lifecycle",
-            f"{indent}        Py_buffer _view;",
-            f"{indent}        if (PyBuffer_FillInfo(&_view, _owner.ptr(), _bb_addr, (Py_ssize_t)_bb_cap, 0, 0) == -1) {{",
-            f"{indent}            PyErr_Clear(); return nb::none();",
-            f"{indent}        }}",
-            f"{indent}        PyObject* _mview = PyMemoryView_FromBuffer(&_view);",
-            f"{indent}        if (!_mview) return nb::none();",
-            f"{indent}        nb::object _mview_obj = nb::borrow(_mview);",
-            f"{indent}        Py_DECREF(_mview);",
-            f"{indent}        return _mview_obj;",
-            f"{indent}    }}",
-            f"{indent}}}",
-            f"{indent}// Fallback: heap ByteBuffer — copy via array()",
-            f"{indent}LOGV(\"BYTEBUFFER_HEAP fallback\");",
-            f"{indent}jclass _bbcls = env->GetObjectClass(raw);",
-            f"{indent}jmethodID _bbarr = env->GetMethodID(_bbcls, \"array\", \"()[B\");",
-            f"{indent}env->DeleteLocalRef(_bbcls);",
-            f"{indent}if (_bbarr) {{",
-            f"{indent}    jbyteArray _bba = (jbyteArray)env->CallObjectMethod(raw, _bbarr);",
-            f"{indent}    env->DeleteLocalRef(raw);",
-            f"{indent}    if (_bba) {{",
-            f"{indent}        jsize _bblen = env->GetArrayLength(_bba);",
-            f"{indent}        jbyte* _bbp = env->GetByteArrayElements(_bba, nullptr);",
-            f"{indent}        nb::bytes _bbb(reinterpret_cast<const char*>(_bbp), _bblen);",
-            f"{indent}        env->ReleaseByteArrayElements(_bba, _bbp, JNI_ABORT);",
-            f"{indent}        env->DeleteLocalRef(_bba);",
-            f"{indent}        return _bbb;",
-            f"{indent}    }}",
-            f"{indent}}} else {{ env->ExceptionClear(); }}",
-            f"{indent}env->DeleteLocalRef(raw);",
-            f"{indent}return nb::none();",
+            f"{indent}// [OPT] ByteBuffer → memoryview/bytes via stratum_bytebuffer_to_obj",
+            f"{indent}LOGT_JNI_TO_PY(\"\", \"{mname}\", \"bytebuffer\");",
+            f"{indent}return stratum_bytebuffer_to_obj(env, raw);",
         ]
     # [A39] Throwable return
     elif ret_decl == "StratumThrowable*":
@@ -3179,6 +2785,27 @@ void         remove_callback(const std::string& key);
 size_t       remove_callbacks_by_prefix(const std::string& prefix);
 // [Action32] Count of stored callbacks
 size_t       stratum_callback_count();
+// ── [OPT] Runtime helpers — reduce generated code size ───────────────────────
+// String conversion (UTF-8 ↔ UTF-16, never NewStringUTF/GetStringUTFChars)
+jstring     stratum_str_to_jstring(JNIEnv* env, const std::string& utf8);
+std::string stratum_jstring_to_str(JNIEnv* env, jobject jstr_obj);
+
+// Exception: call after any JNI call that can throw; throws std::runtime_error if pending
+void stratum_check_java_exc(JNIEnv* env);
+
+// Collection/Map conversions
+nb::list   stratum_collection_to_list(JNIEnv* env, jobject collection);
+nb::dict   stratum_map_to_dict(JNIEnv* env, jobject map);
+
+// Array conversions
+nb::list   stratum_string_array_to_list(JNIEnv* env, jobject arr);
+nb::list   stratum_jobject_array_to_list(JNIEnv* env, jobject arr);
+
+// Varargs: nb::args tuple → jobjectArray (caller must DeleteLocalRef result)
+jobjectArray stratum_pack_varargs(JNIEnv* env, nb::args args);
+
+// ByteBuffer → memoryview (direct, zero-copy) or nb::bytes (heap fallback)
+nb::object  stratum_bytebuffer_to_obj(JNIEnv* env, jobject bb);
 """
 
 
@@ -3746,6 +3373,273 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
 
     LOGV("DISPATCH_DONE key=%s", base_key.c_str());
     return result;
+}
+
+// =============================================================================
+// [OPT] Runtime helpers — stratum_str_to_jstring etc.
+// =============================================================================
+
+jstring stratum_str_to_jstring(JNIEnv* env, const std::string& utf8) {
+    if (!env) return nullptr;
+    const uint8_t* ub = reinterpret_cast<const uint8_t*>(utf8.data());
+    size_t ul = utf8.size();
+    std::u16string u16;
+    u16.reserve(ul);
+    for (size_t i = 0; i < ul; ) {
+        uint32_t cp = 0;
+        uint8_t b0 = ub[i];
+        if (b0 < 0x80u)                                  { cp = b0; i += 1; }
+        else if ((b0 & 0xE0u) == 0xC0u && i+1 < ul)     { cp = ((uint32_t)(b0 & 0x1Fu) << 6)  | (ub[i+1] & 0x3Fu); i += 2; }
+        else if ((b0 & 0xF0u) == 0xE0u && i+2 < ul)     { cp = ((uint32_t)(b0 & 0x0Fu) << 12) | ((uint32_t)(ub[i+1] & 0x3Fu) << 6) | (ub[i+2] & 0x3Fu); i += 3; }
+        else if ((b0 & 0xF8u) == 0xF0u && i+3 < ul)     { cp = ((uint32_t)(b0 & 0x07u) << 18) | ((uint32_t)(ub[i+1] & 0x3Fu) << 12) | ((uint32_t)(ub[i+2] & 0x3Fu) << 6) | (ub[i+3] & 0x3Fu); i += 4; }
+        else { ++i; continue; }
+        if (cp < 0x10000u) { u16 += (char16_t)cp; }
+        else if (cp < 0x110000u) { cp -= 0x10000u; u16 += (char16_t)(0xD800u | (cp >> 10)); u16 += (char16_t)(0xDC00u | (cp & 0x3FFu)); }
+    }
+    return env->NewString(reinterpret_cast<const jchar*>(u16.data()), (jsize)u16.size());
+}
+
+std::string stratum_jstring_to_str(JNIEnv* env, jobject jstr_obj) {
+    if (!env || !jstr_obj) return "";
+    jstring jstr = (jstring)jstr_obj;
+    jsize slen = env->GetStringLength(jstr);
+    const jchar* sjc = env->GetStringChars(jstr, nullptr);
+    std::string res;
+    if (sjc && slen > 0) {
+        res.reserve((size_t)slen * 3);
+        for (jsize i = 0; i < slen; ) {
+            uint32_t cp;
+            uint16_t c1 = (uint16_t)sjc[i++];
+            if (c1 >= 0xD800u && c1 <= 0xDBFFu && i < slen) {
+                uint16_t c2 = (uint16_t)sjc[i];
+                if (c2 >= 0xDC00u && c2 <= 0xDFFFu) { cp = 0x10000u + (((uint32_t)(c1 - 0xD800u)) << 10) + (uint32_t)(c2 - 0xDC00u); ++i; }
+                else { cp = c1; }
+            } else { cp = c1; }
+            if (cp < 0x80u)      { res += (char)cp; }
+            else if (cp < 0x800u){ res += (char)(0xC0u|(cp>>6)); res += (char)(0x80u|(cp&0x3Fu)); }
+            else if (cp < 0x10000u){ res += (char)(0xE0u|(cp>>12)); res += (char)(0x80u|((cp>>6)&0x3Fu)); res += (char)(0x80u|(cp&0x3Fu)); }
+            else { res += (char)(0xF0u|(cp>>18)); res += (char)(0x80u|((cp>>12)&0x3Fu)); res += (char)(0x80u|((cp>>6)&0x3Fu)); res += (char)(0x80u|(cp&0x3Fu)); }
+        }
+    }
+    if (sjc) env->ReleaseStringChars(jstr, sjc);
+    env->DeleteLocalRef((jobject)jstr);
+    return res;
+}
+
+void stratum_check_java_exc(JNIEnv* env) {
+    if (!env || !env->ExceptionCheck()) return;
+    jthrowable ex = env->ExceptionOccurred();
+    env->ExceptionClear();
+    std::string msg = "Java exception";
+    if (ex) {
+        jclass ecls = env->GetObjectClass(ex);
+        jmethodID emid = env->GetMethodID(ecls, "getMessage", "()Ljava/lang/String;");
+        if (emid) {
+            jstring jm = (jstring)env->CallObjectMethod(ex, emid);
+            if (jm) {
+                const char* cm = env->GetStringUTFChars(jm, nullptr);
+                if (cm) { msg = cm; env->ReleaseStringUTFChars(jm, cm); }
+                env->DeleteLocalRef(jm);
+            }
+        }
+        env->DeleteLocalRef(ecls);
+        env->DeleteLocalRef(ex);
+    }
+    LOGE("Java exception caught: %s", msg.c_str());
+    throw std::runtime_error(msg);
+}
+
+nb::list stratum_collection_to_list(JNIEnv* env, jobject collection) {
+    nb::list result;
+    if (!env || !collection) return result;
+    jclass cls = env->GetObjectClass(collection);
+    jmethodID msize = env->GetMethodID(cls, "size", "()I");
+    jmethodID mget  = env->GetMethodID(cls, "get",  "(I)Ljava/lang/Object;");
+    if (msize && mget) {
+        jint len = env->CallIntMethod(collection, msize);
+        for (jint i = 0; i < len; ++i) {
+            jobject item = env->CallObjectMethod(collection, mget, i);
+            if (!item) { result.append(nb::none()); continue; }
+            if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
+                result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
+            } else {
+                jobject gref = env->NewGlobalRef(item);
+                env->DeleteLocalRef(item);
+                result.append(nb::cast(new StratumObject(gref), nb::rv_policy::take_ownership));
+            }
+        }
+    } else {
+        env->ExceptionClear();
+        jmethodID miter = env->GetMethodID(cls, "iterator", "()Ljava/util/Iterator;");
+        if (miter) {
+            jobject iter = env->CallObjectMethod(collection, miter);
+            if (iter) {
+                jclass ic = env->GetObjectClass(iter);
+                jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+                jmethodID mnx = env->GetMethodID(ic, "next",    "()Ljava/lang/Object;");
+                env->DeleteLocalRef(ic);
+                while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                    jobject item = env->CallObjectMethod(iter, mnx);
+                    if (!item) { result.append(nb::none()); continue; }
+                    if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
+                        result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
+                    } else {
+                        jobject gref = env->NewGlobalRef(item);
+                        env->DeleteLocalRef(item);
+                        result.append(nb::cast(new StratumObject(gref), nb::rv_policy::take_ownership));
+                    }
+                }
+                env->DeleteLocalRef(iter);
+            }
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(collection);
+    return result;
+}
+
+nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
+    nb::dict result;
+    if (!env || !map) return result;
+    jclass mcls = env->GetObjectClass(map);
+    jmethodID mes = env->GetMethodID(mcls, "entrySet", "()Ljava/util/Set;");
+    env->DeleteLocalRef(mcls);
+    if (!mes) { env->ExceptionClear(); env->DeleteLocalRef(map); return result; }
+    jobject es = env->CallObjectMethod(map, mes);
+    jclass escls = env->GetObjectClass(es);
+    jmethodID esit = env->GetMethodID(escls, "iterator", "()Ljava/util/Iterator;");
+    env->DeleteLocalRef(escls);
+    jobject iter = env->CallObjectMethod(es, esit);
+    env->DeleteLocalRef(es);
+    jclass ic = env->GetObjectClass(iter);
+    jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+    jmethodID mnx = env->GetMethodID(ic, "next",    "()Ljava/lang/Object;");
+    env->DeleteLocalRef(ic);
+    while (env->CallBooleanMethod(iter, mhn)) {
+        jobject entry = env->CallObjectMethod(iter, mnx);
+        jclass ec = env->GetObjectClass(entry);
+        jmethodID mkey = env->GetMethodID(ec, "getKey",   "()Ljava/lang/Object;");
+        jmethodID mval = env->GetMethodID(ec, "getValue", "()Ljava/lang/Object;");
+        env->DeleteLocalRef(ec);
+        jobject ek = env->CallObjectMethod(entry, mkey);
+        jobject ev = env->CallObjectMethod(entry, mval);
+        env->DeleteLocalRef(entry);
+        nb::object pyk, pyv;
+        if (ek && g_jstring_class && env->IsInstanceOf(ek, g_jstring_class)) {
+            pyk = nb::str(stratum_jstring_to_str(env, ek).c_str());
+        } else if (ek) {
+            pyk = nb::cast(new StratumObject(env->NewGlobalRef(ek)), nb::rv_policy::take_ownership);
+            env->DeleteLocalRef(ek);
+        } else { pyk = nb::none(); }
+        if (ev && g_jstring_class && env->IsInstanceOf(ev, g_jstring_class)) {
+            pyv = nb::str(stratum_jstring_to_str(env, ev).c_str());
+        } else if (ev) {
+            pyv = nb::cast(new StratumObject(env->NewGlobalRef(ev)), nb::rv_policy::take_ownership);
+            env->DeleteLocalRef(ev);
+        } else { pyv = nb::none(); }
+        result[pyk] = pyv;
+    }
+    env->DeleteLocalRef(iter);
+    env->DeleteLocalRef(map);
+    return result;
+}
+
+nb::list stratum_string_array_to_list(JNIEnv* env, jobject arr_obj) {
+    nb::list result;
+    if (!env || !arr_obj) return result;
+    jobjectArray arr = (jobjectArray)arr_obj;
+    jsize len = env->GetArrayLength(arr);
+    for (jsize i = 0; i < len; ++i) {
+        jstring s = (jstring)env->GetObjectArrayElement(arr, i);
+        if (s) { result.append(nb::str(stratum_jstring_to_str(env, s).c_str())); }
+        else   { result.append(nb::none()); }
+    }
+    env->DeleteLocalRef(arr);
+    return result;
+}
+
+nb::list stratum_jobject_array_to_list(JNIEnv* env, jobject arr_obj) {
+    nb::list result;
+    if (!env || !arr_obj) return result;
+    jobjectArray arr = (jobjectArray)arr_obj;
+    jsize len = env->GetArrayLength(arr);
+    for (jsize i = 0; i < len; ++i) {
+        jobject elem = env->GetObjectArrayElement(arr, i);
+        if (elem) {
+            jobject gref = env->NewGlobalRef(elem);
+            env->DeleteLocalRef(elem);
+            result.append(nb::cast(new StratumObject(gref), nb::rv_policy::take_ownership));
+        } else { result.append(nb::none()); }
+    }
+    env->DeleteLocalRef(arr);
+    return result;
+}
+
+jobjectArray stratum_pack_varargs(JNIEnv* env, nb::args args) {
+    jsize len = (jsize)nb::len(args);
+    jobjectArray arr = env->NewObjectArray(len, g_object_class, nullptr);
+    static jclass _intcls = nullptr; static jmethodID _intvalof = nullptr;
+    if (!_intcls) { jclass c = env->FindClass("java/lang/Integer"); _intcls = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (!_intvalof) _intvalof = env->GetStaticMethodID(_intcls, "valueOf", "(I)Ljava/lang/Integer;");
+    for (jsize i = 0; i < len; ++i) {
+        auto item = args[i];
+        jobject jobj = nullptr;
+        if (nb::isinstance<nb::str>(item)) {
+            jobj = stratum_str_to_jstring(env, nb::cast<std::string>(item));
+        } else if (nb::isinstance<StratumObject>(item)) {
+            jobj = nb::cast<StratumObject*>(item)->obj_;
+        } else if (nb::isinstance<nb::int_>(item)) {
+            jobj = env->CallStaticObjectMethod(_intcls, _intvalof, (jint)nb::cast<long long>(item));
+        }
+        env->SetObjectArrayElement(arr, i, jobj);
+        if (jobj && nb::isinstance<nb::str>(item)) env->DeleteLocalRef(jobj);
+    }
+    return arr;
+}
+
+nb::object stratum_bytebuffer_to_obj(JNIEnv* env, jobject bb) {
+    if (!env || !bb) return nb::none();
+    void* addr = env->GetDirectBufferAddress(bb);
+    if (addr) {
+        jlong cap = env->GetDirectBufferCapacity(bb);
+        if (cap > 0) {
+            jobject gref = env->NewGlobalRef(bb);
+            env->DeleteLocalRef(bb);
+            nb::capsule owner(gref, [](void* p) noexcept {
+                JNIEnv* e = get_env_safe();
+                if (e) e->DeleteGlobalRef((jobject)p);
+            });
+            Py_buffer view;
+            if (PyBuffer_FillInfo(&view, owner.ptr(), addr, (Py_ssize_t)cap, 0, 0) == -1) {
+                PyErr_Clear(); return nb::none();
+            }
+            PyObject* mv = PyMemoryView_FromBuffer(&view);
+            if (!mv) return nb::none();
+            nb::object mvo = nb::borrow(mv);
+            Py_DECREF(mv);
+            return mvo;
+        }
+    }
+    // Heap fallback
+    jclass bcls = env->GetObjectClass(bb);
+    jmethodID barr = env->GetMethodID(bcls, "array", "()[B");
+    env->DeleteLocalRef(bcls);
+    if (barr) {
+        jbyteArray ba = (jbyteArray)env->CallObjectMethod(bb, barr);
+        env->DeleteLocalRef(bb);
+        if (ba) {
+            jsize blen = env->GetArrayLength(ba);
+            jbyte* bp = env->GetByteArrayElements(ba, nullptr);
+            nb::bytes bres(reinterpret_cast<const char*>(bp), blen);
+            env->ReleaseByteArrayElements(ba, bp, JNI_ABORT);
+            env->DeleteLocalRef(ba);
+            return bres;
+        }
+    } else { env->ExceptionClear(); }
+    env->DeleteLocalRef(bb);
+    return nb::none();
 }
 """
 

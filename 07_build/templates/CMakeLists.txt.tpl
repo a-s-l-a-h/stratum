@@ -37,6 +37,8 @@ target_compile_options(_stratum PRIVATE
     -O2
     -Wno-unused-parameter
     -Wno-unused-variable
+    -ffunction-sections
+    -fdata-sections
 )
 
 # ── Link libraries ────────────────────────────────────────────────────────────
@@ -46,14 +48,21 @@ find_library(android-lib android)
 target_link_libraries(_stratum PRIVATE
     ${log-lib}
     ${android-lib}
+    "-L${STRATUM_PYTHON_LIB_DIR}"
+    "-lpython${STRATUM_PYTHON_VERSION}"
 )
 
 # Link libpython dynamically from Chaquopy target
 # This satisfies the linker for Python C API symbols (Py_Dealloc etc)
 # The actual libpython3.12.so is provided by Chaquopy on device — not bundled
+
+
+
 target_link_options(_stratum PRIVATE
-    "-L${STRATUM_PYTHON_LIB_DIR}"
-    "-lpython${STRATUM_PYTHON_VERSION}"
+    -Wl,--gc-sections
+    -Wl,--exclude-libs,ALL
+    -Wl,--strip-all
+    -Wl,--as-needed
 )
 
 # ── Output ────────────────────────────────────────────────────────────────────

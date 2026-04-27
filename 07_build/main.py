@@ -277,6 +277,7 @@ def step_b(
     android_api:  str,
     verbose_log:  bool,
     ultra_log:    bool,
+    release:      bool = False, 
 ) -> dict:
 
     toolchain = ndk_path / "build" / "cmake" / "android.toolchain.cmake"
@@ -298,6 +299,11 @@ def step_b(
         cxx_flags_list.append("-DSTRATUM_ULTRA_LOG=1")
     elif verbose_log:
         cxx_flags_list.append("-DSTRATUM_VERBOSE_LOG=1")
+    
+    if release:
+        cxx_flags_list += ["-O2", "-fvisibility=hidden", "-fvisibility-inlines-hidden"]
+    else:
+        pass  # CMakeLists already sets -O2 as baseline
         
     cxx_flags = " ".join(cxx_flags_list)
 
@@ -350,6 +356,24 @@ def step_b(
     so_dest = output_dir / "_stratum.so"
     shutil.copy2(so_files[0], so_dest)
 
+    # Strip debug symbols if release mode
+    if release:
+        strip_candidates = list((ndk_path / "toolchains" / "llvm" / "prebuilt").rglob("llvm-strip"))
+        if not strip_candidates:
+            strip_candidates = list((ndk_path / "toolchains" / "llvm" / "prebuilt").rglob("llvm-strip.exe"))
+        if strip_candidates:
+            strip_exe = str(strip_candidates[0])
+            strip_result = subprocess.run(
+                [strip_exe, "--strip-unneeded", str(so_dest)],
+                capture_output=True, text=True
+            )
+            if strip_result.returncode == 0:
+                print(f"   Strip OK: {so_dest.stat().st_size / (1024*1024):.2f} MB after strip")
+            else:
+                print(f"   Strip WARN: {strip_result.stderr.strip()}")
+        else:
+            print("   Strip SKIP: llvm-strip not found in NDK")
+
     return {
         "success":            True,
         "so_path":            str(so_dest),
@@ -385,6 +409,9 @@ def main():
         help="Enable LOGD statements (method entry/exit, class init, IDs)")
     parser.add_argument("--ultra-log", action="store_true",
         help="Enable ultra-deep LOGV tracing (EVERY single JNI call, argument, and return value)")
+
+    parser.add_argument("--release", action="store_true",
+        help="Enable full release optimizations: LTO, -O3, strip, visibility=hidden")
   
     args = parser.parse_args()
 
@@ -480,6 +507,7 @@ def main():
         android_api = android_api,
         verbose_log = args.verbose_log,
         ultra_log   = args.ultra_log,
+        release     = args.release, 
     )
 
     report["chaquopy_version"] = args.chaquopy
