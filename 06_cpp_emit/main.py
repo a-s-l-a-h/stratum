@@ -924,6 +924,10 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
 
             // ── abstract adapter (Stage 05.5 generated Java class) ──────
             case 'a': {
+                if (item.is_none()) {
+                    jargs[i].l = nullptr;
+                    break;
+                }
                 if (nb::hasattr(item, "_ptr")) {
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
                     break;
@@ -943,12 +947,17 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 jstring jk = env->NewStringUTF(key.c_str());
                 jobject aobj = env->NewObject(acls, actor, jk);
                 env->DeleteLocalRef(jk); env->DeleteLocalRef(acls);
+                stratum_check_java_exc(env);
                 jargs[i].l = aobj; locals.push_back(aobj);
                 break;
             }
 
             // ── callable-to-proxy (dynamic java.lang.reflect.Proxy) ──────
             case 'p': {
+                if (item.is_none()) {
+                    jargs[i].l = nullptr;
+                    break;
+                }
                 if (nb::hasattr(item, "_ptr")) {
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
                     break;
@@ -968,6 +977,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 jobjectArray ia = env->NewObjectArray(1, g_class_class, iface_cls);
                 jobject proxy = env->CallStaticObjectMethod(g_proxy_class, new_proxy, g_app_class_loader, ia, handler);
                 env->DeleteLocalRef(iface_cls); env->DeleteLocalRef(ia); env->DeleteLocalRef(handler);
+                stratum_check_java_exc(env);
                 jargs[i].l = proxy; locals.push_back(proxy);
                 break;
             }
@@ -1137,6 +1147,41 @@ int64_t call_o(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
     jobject gref = env->NewGlobalRef(res);
     env->DeleteLocalRef(res);
     return (int64_t)(uintptr_t)gref;
+}
+
+nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
+    RESOLVE_AND_LOOKUP()
+    jobject res;
+    if (cls.methods[slot].is_static) {
+        nb::gil_scoped_release r;
+        res = env->CallStaticObjectMethodA(cls.class_ref, mid, jargs);
+    } else {
+        nb::gil_scoped_release r;
+        res = env->CallObjectMethodA((jobject)(uintptr_t)ptr, mid, jargs);
+    }
+    CLEANUP_AND_CHECK()
+    if (!res) return nb::list();
+
+    jclass objArrCls = env->FindClass("[Ljava/lang/Object;");
+    nb::list py_list;
+    if (env->IsInstanceOf(res, objArrCls)) {
+        jsize len = env->GetArrayLength((jarray)res);
+        for (jsize i = 0; i < len; ++i) {
+            jobject elem = env->GetObjectArrayElement((jobjectArray)res, i);
+            if (!elem) {
+                py_list.append(nb::none());
+            } else if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class)) {
+                py_list.append(nb::str(stratum_jstring_to_str(env, elem).c_str()));
+            } else {
+                jobject gref = env->NewGlobalRef(elem);
+                env->DeleteLocalRef(elem);
+                py_list.append(nb::cast((int64_t)(uintptr_t)gref));
+            }
+        }
+    }
+    env->DeleteLocalRef(objArrCls);
+    env->DeleteLocalRef(res);
+    return py_list;
 }
 
 int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
@@ -1335,6 +1380,7 @@ int64_t call_j(int64_t, uint32_t, uint32_t, nb::args);
 double call_d(int64_t, uint32_t, uint32_t, nb::args);
 std::string call_str(int64_t, uint32_t, uint32_t, nb::args);
 int64_t call_o(int64_t, uint32_t, uint32_t, nb::args);
+nb::object call_arr(int64_t, uint32_t, uint32_t, nb::args);
 int64_t new_instance(uint32_t, uint32_t, nb::args);
 void delete_ref(int64_t);
 int64_t field_get_i(int64_t, uint32_t, uint32_t);
@@ -1403,6 +1449,7 @@ NB_MODULE(_stratum, m) {
     m.def("call_d", &call_d);
     m.def("call_str", &call_str);
     m.def("call_o", &call_o);
+    m.def("call_arr", &call_arr);
     m.def("new_instance", &new_instance);
     m.def("delete_ref", &delete_ref);
 

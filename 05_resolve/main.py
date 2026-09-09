@@ -236,7 +236,10 @@ def index_and_save(selected_fqns: list, registry: dict, output_dir: Path, closur
         for slot, m in enumerate(ordered):
             m["slot"] = slot
             m["param_tags"] = compute_param_tags(m.get("params", []))
-            m["ret_type_id"] = RET_TYPE_MAP.get(m.get("return_jni", "void"), 10)
+            if m.get("return_is_array", False):
+                m["ret_type_id"] = 11
+            else:
+                m["ret_type_id"] = RET_TYPE_MAP.get(m.get("return_jni", "void"), 10)
             m["safe_name"] = sanitize_id(m.get("name", "unknown"))
 
             # Which Java adapter/interface class a callback-style param

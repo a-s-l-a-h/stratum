@@ -514,25 +514,30 @@ def parse_javap(text: str) -> dict:
             # ── Descriptor continuation ────────────────────────────────────────
             if stripped.startswith("descriptor:"):
                 descriptor_accum = stripped[len("descriptor:"):].strip()
-                if ")" in descriptor_accum:
-                    if current_method is not None:
+                if current_field is not None:
+                    # Field descriptors NEVER contain parentheses and are always 1 line
+                    current_field["descriptor"] = descriptor_accum
+                    fd_params, fd_ret = parse_descriptor(f"(){descriptor_accum}")
+                    current_field["jni_type"]    = fd_ret.get("jni_type", "jobject")
+                    current_field["cpp_type"]    = fd_ret.get("cpp_type", "jobject")
+                    current_field["python_type"] = fd_ret.get("python_type", "object")
+                    current_field["jni_signature"] = descriptor_accum
+                    result["fields"].append(current_field)
+                    current_field = None
+                    descriptor_accum = ""
+                    pending_throws = []
+                    continue
+
+                if current_method is not None:
+                    if ")" in descriptor_accum:
                         current_method = finish_method(current_method, descriptor_accum, pending_throws)
                         result["methods"].append(current_method)
                         current_method = None
-                    elif current_field is not None:
-                        # Field descriptor — record java type
-                        current_field["descriptor"] = descriptor_accum
-                        fd_params, fd_ret = parse_descriptor(f"(){descriptor_accum}")
-                        current_field["jni_type"]    = fd_ret.get("jni_type", "jobject")
-                        current_field["cpp_type"]    = fd_ret.get("cpp_type", "jobject")
-                        current_field["python_type"] = fd_ret.get("python_type", "object")
-                        result["fields"].append(current_field)
-                        current_field = None
-                    descriptor_accum = ""
-                else:
-                    state = STATE_IN_DESCRIPTOR
-                pending_throws = []
-                continue
+                        descriptor_accum = ""
+                        pending_throws = []
+                    else:
+                        state = STATE_IN_DESCRIPTOR
+                    continue
 
             # ── ConstantValue ─────────────────────────────────────────────────
             if stripped.startswith("ConstantValue:") and current_field is not None:

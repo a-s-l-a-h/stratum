@@ -1,307 +1,469 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stratum Pipeline — Stage 05.5 : Abstract Adapter + Interface Adapter Generator
+=============================================================================
+Stratum Pipeline — Stage 05.5 : Abstract & Interface Adapter Generator
+=============================================================================
+LOCATION: 05_5_abstract/main.py
+VERSION:  v9.2
 
-FIX: jni_to_java_type() now uses java_type directly for jobject params.
-     This means CharSequence stays CharSequence, Editable stays Editable,
-     CameraDevice stays android.hardware.camera2.CameraDevice — exactly
-     matching the real Java interface signatures. No hardcoded lookup needed.
+DESCRIPTION:
+    Android's SDK frequently uses abstract classes (e.g., CameraCaptureSession.
+    StateCallback, CameraCaptureSession.CaptureCallback, WebViewClient) and
+    multi-method interfaces (e.g., TextWatcher, SurfaceTextureListener) for
+    event handling and lifecycle notifications.
+
+    Dynamic proxies (java.lang.reflect.Proxy) can ONLY implement Java
+    interfaces, and fail with an IllegalArgumentException when invoked on
+    abstract classes. Furthermore, dynamic proxies cannot easily route
+    arbitrary multi-method event callbacks to dynamic Python callables.
+
+    This stage bridges that gap by:
+      1. Analyzing parsed class metadata to detect abstract classes and
+         multi-method interface callback targets.
+      2. Generating real, compilable Java adapter source files (.java) that
+         subclass the target abstract class or implement the interface.
+      3. Overriding each callback method and routing its invocation back to
+         the Stratum C++ engine via StratumInvocationHandler.nativeDispatch().
+      4. Patching the resolved JSON corpus so subsequent pipeline stages
+         (05_resolve Pass 2, 06_cpp_emit, 08_pyi_emit) assign slot tag 'a'
+         (abstract adapter) instead of tag 'p' (dynamic proxy).
+
+FIXES INCLUDED:
+    - Fixed CaptureCallback exclusion: Detects and emits adapters for
+      classes whose callback methods have default empty bodies rather
+      than the strict `abstract` keyword (e.g. CaptureCallback, WebViewClient).
+    - Fixed CharSequence / type alias collapse: Preserves concrete Java types
+      (e.g., java.lang.CharSequence) directly from Stage 04 definitions.
+    - Full primitive and array boxing for nativeDispatch Object[] argument arrays.
+=============================================================================
 """
 
 import argparse
 import copy
 import json
+import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # =============================================================================
-# Constants
+# Package & Runtime Constants
 # =============================================================================
 
-ADAPTER_PACKAGE  = "com.stratum.adapters"
-DISPATCH_CLASS   = "com.stratum.runtime.StratumInvocationHandler"
+ADAPTER_PACKAGE: str = "com.stratum.adapters"
+DISPATCH_CLASS: str = "com.stratum.runtime.StratumInvocationHandler"
+ADAPTER_CLASS_PREFIX: str = "Adapter_"
 
-SKIP_SUMMARIES = frozenset({
+# Standard summary and metadata file names that should never be parsed as class JSONs
+SKIP_SUMMARIES: frozenset = frozenset({
     "parse_summary.json",
     "resolve_summary.json",
     "manifest.json",
     "cpp_summary.json",
     "pyi_summary.json",
+    "extract_summary.json",
+    "javap_summary.json",
 })
 
-ADAPTER_CLASS_PREFIX = "Adapter_"
+# Methods defined directly on java.lang.Object that must never be treated as interface callbacks
+OBJECT_METHODS: frozenset = frozenset({
+    "equals",
+    "hashCode",
+    "toString",
+    "getClass",
+    "notify",
+    "notifyAll",
+    "wait",
+    "finalize",
+    "clone",
+})
+
+# Primitive type lookup for Java signatures
+PRIMITIVE_JAVA_MAP: Dict[str, str] = {
+    "jboolean": "boolean",
+    "jbyte": "byte",
+    "jchar": "char",
+    "jshort": "short",
+    "jint": "int",
+    "jlong": "long",
+    "jfloat": "float",
+    "jdouble": "double",
+    "void": "void",
+}
+
+# Primitive array type lookup for Java signatures
+PRIMITIVE_ARRAY_MAP: Dict[str, str] = {
+    "jbooleanArray": "boolean[]",
+    "jbyteArray": "byte[]",
+    "jcharArray": "char[]",
+    "jshortArray": "short[]",
+    "jintArray": "int[]",
+    "jlongArray": "long[]",
+    "jfloatArray": "float[]",
+    "jdoubleArray": "double[]",
+}
+
+# Primitive boxing expressions for passing values into Object[] for nativeDispatch
+BOXING_EXPRESSIONS: Dict[str, str] = {
+    "jboolean": "Boolean.valueOf({var})",
+    "jbyte": "Byte.valueOf({var})",
+    "jchar": "Character.valueOf({var})",
+    "jshort": "Short.valueOf({var})",
+    "jint": "Integer.valueOf({var})",
+    "jlong": "Long.valueOf({var})",
+    "jfloat": "Float.valueOf({var})",
+    "jdouble": "Double.valueOf({var})",
+}
+
+# Default return values when Java requires a return statement in an overridden method
+JAVA_DEFAULT_RETURNS: Dict[str, str] = {
+    "jboolean": "return false;",
+    "jbyte": "return 0;",
+    "jchar": "return 0;",
+    "jshort": "return 0;",
+    "jint": "return 0;",
+    "jlong": "return 0L;",
+    "jfloat": "return 0.0f;",
+    "jdouble": "return 0.0;",
+    "void": "",
+}
+
+# Default zero/null literals for constructor chaining
+NULL_DEFAULTS: Dict[str, str] = {
+    "jboolean": "false",
+    "jbyte": "0",
+    "jchar": "0",
+    "jshort": "0",
+    "jint": "0",
+    "jlong": "0L",
+    "jfloat": "0.0f",
+    "jdouble": "0.0",
+}
 
 
 # =============================================================================
-# Logging helpers
+# Logging Infrastructure
 # =============================================================================
 
-def log_info(msg):  print(f"[INFO]  {msg}", flush=True)
-def log_ok(msg):    print(f"[OK]    {msg}", flush=True)
-def log_warn(msg):  print(f"[WARN]  {msg}", flush=True)
-def log_skip(msg):  print(f"[SKIP]  {msg}", flush=True)
-def log_error(msg): print(f"[ERROR] {msg}", flush=True)
-def log_debug(msg): print(f"[DEBUG] {msg}", flush=True)
+class Logger:
+    """Provides formatted console logging with timestamps and log levels."""
 
-def print_header(title):
-    print("=" * 70)
-    print(f"  {title}")
-    print("=" * 70)
+    @staticmethod
+    def info(msg: str) -> None:
+        print(f"[INFO]  {msg}", flush=True)
 
-def print_section(title):
-    print(f"\n--- {title} ---", flush=True)
+    @staticmethod
+    def ok(msg: str) -> None:
+        print(f"[OK]    {msg}", flush=True)
+
+    @staticmethod
+    def warn(msg: str) -> None:
+        print(f"[WARN]  {msg}", flush=True)
+
+    @staticmethod
+    def skip(msg: str) -> None:
+        print(f"[SKIP]  {msg}", flush=True)
+
+    @staticmethod
+    def error(msg: str) -> None:
+        print(f"[ERROR] {msg}", flush=True)
+
+    @staticmethod
+    def debug(msg: str) -> None:
+        print(f"[DEBUG] {msg}", flush=True)
+
+    @staticmethod
+    def header(title: str) -> None:
+        print("=" * 78, flush=True)
+        print(f"  {title}", flush=True)
+        print("=" * 78, flush=True)
+
+    @staticmethod
+    def section(title: str) -> None:
+        print(f"\n--- {title} ---", flush=True)
 
 
 # =============================================================================
-# Name helpers
+# Name & Identifier Normalization Utilities
 # =============================================================================
 
-def fqn_to_jni(fqn):
+def fqn_to_jni(fqn: str) -> str:
+    """Convert dotted FQN to slash-separated JNI class name."""
     return fqn.replace(".", "/")
 
-def adapter_class_name(fqn):
-    safe = re.sub(r"[.$]", "_", fqn)
-    return f"{ADAPTER_CLASS_PREFIX}{safe}"
 
-def adapter_full_class(fqn):
+def sanitize_class_name(name: str) -> str:
+    """Ensure a simple class name contains only valid Java identifier characters."""
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    if sanitized and sanitized[0].isdigit():
+        sanitized = "_" + sanitized
+    return sanitized
+
+
+def adapter_class_name(fqn: str) -> str:
+    """
+    Derive the unqualified name of the generated Java adapter class.
+    Example:
+        android.hardware.camera2.CameraDevice$StateCallback
+        -> Adapter_android_hardware_camera2_CameraDevice_StateCallback
+    """
+    safe_suffix = re.sub(r"[.$]", "_", fqn)
+    return f"{ADAPTER_CLASS_PREFIX}{safe_suffix}"
+
+
+def adapter_full_class(fqn: str) -> str:
+    """
+    Derive the fully qualified Java name of the generated adapter.
+    Example: com.stratum.adapters.Adapter_android_view_View_OnClickListener
+    """
     return f"{ADAPTER_PACKAGE}.{adapter_class_name(fqn)}"
 
-def adapter_jni(fqn):
+
+def adapter_jni(fqn: str) -> str:
+    """
+    Derive the JNI internal slash path for the adapter class.
+    Example: com/stratum/adapters/Adapter_android_view_View_OnClickListener
+    """
     return fqn_to_jni(adapter_full_class(fqn))
 
 
+def clean_generics(sig: str) -> str:
+    """Remove generic type arguments (e.g. Map<String, List<Integer>> -> Map)."""
+    result = []
+    depth = 0
+    for char in sig:
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            result.append(char)
+    return "".join(result)
+
+
 # =============================================================================
-# Java type helpers
-#
-# KEY DESIGN DECISION:
-#   For jobject params, we use the java_type field from Stage 04/05 directly.
-#   Stage 04 parsed the real Java signature — it already knows the type is
-#   "java.lang.CharSequence", "android.text.Editable", etc.
-#   We just normalize slashes→dots and $→dot and use it as-is.
-#
-#   This is why the working adapters (CameraDevice, SurfaceTexture) work:
-#     java_type = "android.hardware.camera2.CameraDevice"  →  used directly
-#   And why TextWatcher broke with the old code:
-#     java_type = "java.lang.CharSequence"  →  was incorrectly mapped to String
-#
-#   The correct approach: TRUST java_type. Never override it with a lookup table.
+# Type Resolution & Conversion Helpers
 # =============================================================================
 
-def jni_to_java_type(jni_type: str, java_type: str = "") -> str:
+def jni_to_java_type(jni_type: str, java_type_hint: str = "") -> str:
     """
-    Convert JNI type + java_type hint to a Java source type string.
+    Convert a JNI type name and a Java type hint into a valid Java source type declaration.
+
+    Design Rule:
+        We trust the captured `java_type` from parsing whenever available.
+        Only when `java_type` is generic or absent do we fall back to the JNI descriptor.
     """
-    PRIMITIVES = {
-        "jboolean": "boolean", "jbyte": "byte", "jchar": "char",
-        "jshort": "short", "jint": "int", "jlong": "long",
-        "jfloat": "float", "jdouble": "double", "void": "void",
-    }
-    if jni_type in PRIMITIVES:
-        return PRIMITIVES[jni_type]
+    if jni_type in PRIMITIVE_JAVA_MAP:
+        return PRIMITIVE_JAVA_MAP[jni_type]
 
-    PRIM_ARRAYS = {
-        "jbooleanArray": "boolean[]", "jbyteArray": "byte[]",
-        "jcharArray": "char[]", "jshortArray": "short[]",
-        "jintArray": "int[]", "jlongArray": "long[]",
-        "jfloatArray": "float[]", "jdoubleArray": "double[]",
-    }
-    if jni_type in PRIM_ARRAYS:
-        return PRIM_ARRAYS[jni_type]
+    if jni_type in PRIMITIVE_ARRAY_MAP:
+        return PRIMITIVE_ARRAY_MAP[jni_type]
 
-    # Normalize java_type if present
-    norm_java = java_type.replace("/", ".").replace("$", ".") if java_type else ""
+    norm_hint = java_type_hint.strip() if java_type_hint else ""
+    if norm_hint:
+        norm_hint = norm_hint.replace("/", ".").replace("$", ".")
+        norm_hint = clean_generics(norm_hint)
 
-    # Force CharSequence over String if it was explicitly captured
-    if norm_java.endswith("CharSequence"):
-        return "CharSequence"
+        if norm_hint.endswith("CharSequence"):
+            return "CharSequence"
 
-    if norm_java:
-        # Object arrays
-        if norm_java.startswith("[L") and norm_java.endswith(";"):
-            base = norm_java[2:-1]
-            if base.startswith("java.lang."):
-                base = base[10:]
-            return base + "[]"
-            
-        # Standard objects
-        if not norm_java.startswith("["):
-            if norm_java.startswith("java.lang."):
-                return norm_java[10:]
-            return norm_java
+        if norm_hint.startswith("[L") and norm_hint.endswith(";"):
+            base_type = norm_hint[2:-1]
+            if base_type.startswith("java.lang."):
+                base_type = base_type[10:]
+            return f"{base_type}[]"
 
-    # Fallbacks
+        if not norm_hint.startswith("["):
+            if norm_hint.startswith("java.lang."):
+                return norm_hint[10:]
+            return norm_hint
+
     if jni_type == "jstring":
         return "String"
     if jni_type == "jobjectArray":
         return "Object[]"
-        
+
     return "Object"
 
 
 def java_return_default(jni_type: str) -> str:
-    """Return a valid Java return statement for the given JNI return type."""
-    mapping = {
-        "jboolean": "return false;",
-        "jbyte":    "return 0;",
-        "jchar":    "return 0;",
-        "jshort":   "return 0;",
-        "jint":     "return 0;",
-        "jlong":    "return 0L;",
-        "jfloat":   "return 0.0f;",
-        "jdouble":  "return 0.0;",
-        "void":     "",
-    }
-    return mapping.get(jni_type, "return null;")
+    """Generate a valid Java return statement matching the expected return type."""
+    return JAVA_DEFAULT_RETURNS.get(jni_type, "return null;")
 
 
-def box_for_dispatch(jni_type: str, varname: str) -> str:
+def box_for_dispatch(jni_type: str, var_name: str) -> str:
     """
-    Box a primitive value for passing in Object[] to nativeDispatch.
-    For object types the varname is already an object — use as-is.
+    Box primitive values so they can be bundled into an Object[] for nativeDispatch.
+    Reference types remain unboxed.
     """
-    BOXING = {
-        "jboolean": f"Boolean.valueOf({varname})",
-        "jbyte":    f"Byte.valueOf({varname})",
-        "jchar":    f"Character.valueOf({varname})",
-        "jshort":   f"Short.valueOf({varname})",
-        "jint":     f"Integer.valueOf({varname})",
-        "jlong":    f"Long.valueOf({varname})",
-        "jfloat":   f"Float.valueOf({varname})",
-        "jdouble":  f"Double.valueOf({varname})",
-    }
-    return BOXING.get(jni_type, varname)
+    pattern = BOXING_EXPRESSIONS.get(jni_type)
+    if pattern:
+        return pattern.format(var=var_name)
+    return var_name
 
 
-def null_default_for(p: dict) -> str:
+def null_default_for(param: Dict[str, Any]) -> str:
     """
-    Return the Java null/zero literal appropriate for a constructor param.
-    Used when generating the no-arg convenience constructor that delegates
-    to the full constructor.
+    Generate an appropriate zero or null literal for constructor chaining
+    when generating convenience constructors.
     """
-    mapping = {
-        "jboolean": "false",
-        "jbyte":    "0",
-        "jchar":    "0",
-        "jshort":   "0",
-        "jint":     "0",
-        "jlong":    "0L",
-        "jfloat":   "0.0f",
-        "jdouble":  "0.0",
-    }
-    return mapping.get(p.get("jni_type", "jobject"), "null")
+    jni_type = param.get("jni_type", "jobject")
+    return NULL_DEFAULTS.get(jni_type, "null")
 
 
 # =============================================================================
-# Registry loader
+# Registry & Metadata Loader
 # =============================================================================
 
-def load_registry(resolve_dir: Path) -> dict:
-    print_section("Loading Stage 05 registry")
-    registry = {}
-    skipped = failed = 0
+def load_registry(resolve_dir: Path) -> Dict[str, Tuple[Dict[str, Any], Path]]:
+    """
+    Recursively load all parsed/resolved class JSON files from the input directory.
+    Returns a dictionary mapping class FQN to (json_data, file_path).
+    """
+    Logger.section("Loading Class Metadata Registry")
+    registry: Dict[str, Tuple[Dict[str, Any], Path]] = {}
+    total_found = 0
+    skipped_count = 0
+    error_count = 0
 
-    for jf in sorted(resolve_dir.rglob("*.json")):
-        if jf.name in SKIP_SUMMARIES:
-            skipped += 1
+    for json_path in sorted(resolve_dir.rglob("*.json")):
+        if json_path.name in SKIP_SUMMARIES:
+            skipped_count += 1
             continue
-        try:
-            data = json.loads(jf.read_text(encoding="utf-8"))
-            fqn  = data.get("fqn", "")
-            if not fqn:
-                skipped += 1
-                continue
-            if fqn in registry:
-                skipped += 1
-                continue
-            registry[fqn] = (data, jf)
-        except Exception as e:
-            log_warn(f"Error loading {jf.name}: {e}")
-            failed += 1
 
-    log_info(f"Registry: {len(registry):,} classes | skipped={skipped} | failed={failed}")
+        total_found += 1
+        try:
+            raw_text = json_path.read_text(encoding="utf-8")
+            data = json.loads(raw_text)
+            fqn = data.get("fqn", "").strip()
+
+            if not fqn:
+                skipped_count += 1
+                continue
+
+            if fqn in registry:
+                Logger.warn(f"Duplicate entry for FQN '{fqn}' at {json_path.name}; keeping first")
+                skipped_count += 1
+                continue
+
+            registry[fqn] = (data, json_path)
+
+        except Exception as err:
+            Logger.error(f"Failed to read/parse {json_path}: {err}")
+            error_count += 1
+
+    Logger.info(f"Loaded {len(registry):,} classes into registry (Scanned: {total_found}, Skipped: {skipped_count}, Errors: {error_count})")
     return registry
 
 
 # =============================================================================
-# Method collection helpers
+# Method Extraction & Filtering
 # =============================================================================
 
-def all_methods_of(data: dict) -> list:
-    """Collect all methods from all method lists in a class JSON."""
-    methods = []
-    for key in ("declared_methods", "overridden_methods",
-                "inherited_methods", "methods"):
-        methods.extend(data.get(key, []))
+def all_methods_of(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Collect all method dictionaries declared or referenced in a class JSON payload.
+    """
+    methods: List[Dict[str, Any]] = []
+    seen_ids: Set[int] = set()
+
+    for category in ("declared_methods", "overridden_methods", "inherited_methods", "methods"):
+        for method_obj in data.get(category, []):
+            ident = id(method_obj)
+            if ident not in seen_ids:
+                seen_ids.add(ident)
+                methods.append(method_obj)
+
     return methods
 
 
-def get_abstract_methods(data: dict) -> list:
+def get_abstract_methods(data: Dict[str, Any], include_all_non_static: bool = False) -> List[Dict[str, Any]]:
     """
-    For abstract classes: return methods marked is_abstract=True.
-    Deduplicates by name+signature so we don't emit duplicate overrides.
+    Extract methods requiring implementation in an abstract class adapter.
+
+    Args:
+        data: Class metadata dictionary.
+        include_all_non_static: If True, includes all non-static, non-private
+            methods regardless of whether they have the strict `is_abstract` flag.
+            This is required for callback classes (e.g., CaptureCallback, WebViewClient)
+            where methods provide empty default implementations.
     """
-    seen   = set()
-    result = []
-    for m in all_methods_of(data):
-        if not m.get("is_abstract", False):
+    seen_keys: Set[str] = set()
+    result: List[Dict[str, Any]] = []
+
+    for method in all_methods_of(data):
+        if method.get("is_constructor", False):
             continue
-        if m.get("is_constructor", False):
+        if method.get("is_static", False):
             continue
-        key = m.get("name", "") + "|" + m.get("jni_signature", "")
-        if key not in seen:
-            seen.add(key)
-            result.append(m)
+
+        method_name = method.get("name", "")
+        if not method_name or method_name in OBJECT_METHODS:
+            continue
+
+        is_abstract = method.get("is_abstract", False)
+        if not is_abstract and not include_all_non_static:
+            continue
+
+        sig = method.get("jni_signature", "")
+        dedup_key = f"{method_name}|{sig}"
+
+        if dedup_key not in seen_keys:
+            seen_keys.add(dedup_key)
+            result.append(method)
+
     return result
 
 
-def get_interface_methods(data: dict) -> list:
+def get_interface_methods(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    For interfaces: ALL non-static, non-default, non-Object methods
-    must be implemented. Collects from all method lists and deduplicates.
+    Extract all methods from an interface that must be implemented by an adapter.
+    Skips default interface methods, static methods, and java.lang.Object methods.
+    """
+    seen_keys: Set[str] = set()
+    result: List[Dict[str, Any]] = []
 
-    Excludes Object methods because the JVM provides those automatically
-    for any class, so implementing them would cause a compile error
-    if the types don't match exactly.
-    """
-    OBJECT_METHODS = {
-        "equals", "hashCode", "toString", "getClass",
-        "notify", "notifyAll", "wait",
-    }
-    seen   = set()
-    result = []
-    for m in all_methods_of(data):
-        name = m.get("name", "")
-        if m.get("is_constructor", False):
+    for method in all_methods_of(data):
+        if method.get("is_constructor", False):
             continue
-        if m.get("is_static", False):
+        if method.get("is_static", False):
             continue
-        if m.get("is_default", False):   # Java 8 default interface methods
+        if method.get("is_default", False):
             continue
-        if name in OBJECT_METHODS:
+
+        method_name = method.get("name", "")
+        if not method_name or method_name in OBJECT_METHODS:
             continue
-        key = name + "|" + m.get("jni_signature", "")
-        if key not in seen:
-            seen.add(key)
-            result.append(m)
+
+        sig = method.get("jni_signature", "")
+        dedup_key = f"{method_name}|{sig}"
+
+        if dedup_key not in seen_keys:
+            seen_keys.add(dedup_key)
+            result.append(method)
+
     return result
 
 
 # =============================================================================
-# Detection
+# Target Detection
 # =============================================================================
 
-def detect_abstract_classes(registry: dict) -> list:
+def detect_abstract_classes(registry: Dict[str, Tuple[Dict[str, Any], Path]], seed_fqns: Optional[List[str]] = None) -> List[str]:
     """
-    Scan the registry for abstract classes (not interfaces, not annotations)
-    that have at least one abstract method requiring implementation.
-    Returns sorted list of FQNs.
+    Identify abstract classes in the registry requiring generated adapters.
+    If a class is explicitly present in seed_fqns, we allow it even if its
+    callback methods have default empty bodies.
     """
-    print_section("Detecting abstract classes")
-    result = []
+    Logger.section("Detecting Abstract Classes")
+    seed_set = set(seed_fqns or [])
+    detected: List[str] = []
+
     for fqn, (data, _) in registry.items():
         if not data.get("is_abstract", False):
             continue
@@ -309,573 +471,615 @@ def detect_abstract_classes(registry: dict) -> list:
             continue
         if data.get("is_annotation", False):
             continue
-        methods = get_abstract_methods(data)
+
+        is_seed = fqn in seed_set
+        methods = get_abstract_methods(data, include_all_non_static=is_seed)
+
         if not methods:
-            log_warn(f"  {fqn} is abstract but 0 abstract methods found — skipping")
+            if is_seed:
+                Logger.warn(f"Seed class {fqn} is abstract but has no candidate methods to override")
             continue
-        log_info(f"  Abstract class: {fqn} ({len(methods)} abstract methods)")
-        result.append(fqn)
-    log_info(f"Abstract classes detected: {len(result)}")
-    return sorted(result)
+
+        Logger.info(f"Detected Abstract Class: {fqn} ({len(methods)} methods)")
+        detected.append(fqn)
+
+    Logger.info(f"Total abstract classes identified: {len(detected)}")
+    return sorted(detected)
 
 
-def detect_interface_targets(registry: dict, seed_fqns: list) -> list:
+def detect_interface_targets(registry: Dict[str, Tuple[Dict[str, Any], Path]], seed_fqns: List[str]) -> List[str]:
     """
-    From the seed FQNs (targets.json), pick out the ones that are Java
-    interfaces with at least one method. These need adapter files because
-    the single-method proxy system cannot route multi-method callbacks.
+    Identify Java interfaces present in the seed targets that require an adapter.
     """
-    print_section("Detecting interface targets from seeds")
-    result = []
+    Logger.section("Detecting Interface Targets from Seeds")
+    detected: List[str] = []
+
     for fqn in seed_fqns:
         entry = registry.get(fqn)
         if not entry:
-            log_warn(f"  Seed FQN not in registry: {fqn}")
+            Logger.warn(f"Target FQN not present in registry: {fqn}")
             continue
+
         data, _ = entry
         if data.get("is_interface", False):
             methods = get_interface_methods(data)
             if not methods:
-                log_warn(f"  Interface {fqn} has 0 non-Object methods — skipping")
+                Logger.warn(f"Interface {fqn} contains 0 implementable methods — skipping")
                 continue
-            log_info(f"  Interface target: {fqn} ({len(methods)} methods)")
-            result.append(fqn)
-    log_info(f"Interface targets: {len(result)}")
-    return result
+            Logger.info(f"Detected Interface Callback: {fqn} ({len(methods)} methods)")
+            detected.append(fqn)
+
+    Logger.info(f"Total interface callback targets: {len(detected)}")
+    return detected
 
 
 # =============================================================================
-# Name collision detection
+# Collision Detection
 # =============================================================================
 
-def check_name_collisions(to_adapt: list, registry: dict) -> list:
+def check_name_collisions(targets: List[str], registry: Dict[str, Tuple[Dict[str, Any], Path]]) -> List[str]:
     """
-    Verify that no generated adapter name collides with:
-      - a class already in the corpus (full FQN match)
-      - a class simple name already in the corpus
-      - another adapter being generated in this run
-    Returns list of collision messages. Empty = no collisions.
+    Verify that generated adapter class names do not collide with each other
+    or with existing classes in the Android SDK corpus.
     """
-    print_section("Name collision detection")
-    collisions      = []
-    corpus_full     = set(registry.keys())
-    corpus_simple   = {fqn.split(".")[-1] for fqn in registry}
-    generated_names = {}
+    Logger.section("Validating Adapter Name Uniqueness")
+    collisions: List[str] = []
+    corpus_fqns = set(registry.keys())
+    generated_map: Dict[str, str] = {}
 
-    for fqn in to_adapt:
-        cls_name  = adapter_class_name(fqn)
-        full_name = adapter_full_class(fqn)
+    for fqn in targets:
+        cls_name = adapter_class_name(fqn)
+        full_adapter_fqn = adapter_full_class(fqn)
 
-        if full_name in corpus_full:
-            msg = f"COLLISION: {full_name!r} already in corpus"
-            log_error(msg)
+        if full_adapter_fqn in corpus_fqns:
+            msg = f"Collision: generated adapter name '{full_adapter_fqn}' matches existing class in corpus"
+            Logger.error(msg)
             collisions.append(msg)
 
-        if cls_name in corpus_simple:
-            msg = (f"COLLISION: simple name {cls_name!r} matches"
-                   f" corpus entry (src={fqn!r})")
-            log_error(msg)
-            collisions.append(msg)
-
-        if cls_name in generated_names:
-            msg = (f"COLLISION: {fqn!r} and {generated_names[cls_name]!r}"
-                   f" → same adapter name")
-            log_error(msg)
+        if cls_name in generated_map:
+            prev_fqn = generated_map[cls_name]
+            msg = f"Collision: distinct classes '{fqn}' and '{prev_fqn}' yield identical adapter '{cls_name}'"
+            Logger.error(msg)
             collisions.append(msg)
         else:
-            generated_names[cls_name] = fqn
+            generated_map[cls_name] = fqn
 
     if not collisions:
-        log_ok(f"No collisions among {len(to_adapt)} adapters")
+        Logger.ok(f"Validated {len(targets)} adapter names without collisions")
     return collisions
 
 
 # =============================================================================
-# Java adapter emitters
+# Source Code Generation Blocks
 # =============================================================================
 
-def _adapter_header(fqn: str, cls_name: str, extends_or_implements: str) -> list:
-    """Emit the package declaration, imports, and class opening."""
+def _build_adapter_header(fqn: str, cls_name: str, inheritance_clause: str) -> List[str]:
+    """Generate the file banner, package declaration, and class opening."""
     return [
-        f"// Auto-generated by Stratum Stage 05.5 — DO NOT EDIT",
-        f"// Source: {fqn}",
-        f"// Copy this file to: runtime/java/com/stratum/adapters/",
+        "// Auto-generated by Stratum Stage 05.5 — DO NOT EDIT",
+        f"// Source Definition: {fqn}",
+        f"// Destination: runtime/java/{ADAPTER_PACKAGE.replace('.', '/')}/{cls_name}.java",
         f"package {ADAPTER_PACKAGE};",
-        f"",
-        f"import android.util.Log;",
+        "",
+        "import android.util.Log;",
         f"import {DISPATCH_CLASS};",
-        f"",
-        f"public class {cls_name} {extends_or_implements} {{",
-        f"",
-        f"    private static final String TAG = \"StratumAdapter\";",
-        f"    private final String key_;",
-        f"",
+        "",
+        f"public class {cls_name} {inheritance_clause} {{",
+        "",
+        f'    private static final String TAG = "StratumAdapter";',
+        "    private final String key_;",
+        "",
     ]
 
 
-def _adapter_footer(cls_name: str) -> list:
-    """Emit toString() and closing brace."""
+def _build_adapter_footer(cls_name: str) -> List[str]:
+    """Generate diagnostic methods and the closing class brace."""
     return [
-        f"    @Override",
-        f"    public String toString() {{",
-        f"        return \"{cls_name}[key=\" + key_ + \"]\";",
-        f"    }}",
-        f"",
-        f"}}",
-        f"",
+        "    @Override",
+        "    public String toString() {",
+        f'        return "{cls_name}[key=" + key_ + "]";',
+        "    }",
+        "",
+        "}",
+        "",
     ]
 
 
-def _constructor_block(cls_name: str, ctors: list, has_no_arg: bool) -> list:
+def _build_constructor_block(cls_name: str, ctors: List[Dict[str, Any]], has_no_arg: bool) -> List[str]:
     """
-    Emit constructor(s) for an abstract-class adapter.
-
-    If the superclass has a no-arg constructor: emit a single
-      Adapter(String key) { super(); this.key_ = key; }
-
-    If the superclass only has parameterized constructors: emit
-      Adapter(String key, T1 a1, T2 a2, ...) { super(a1, a2, ...); ... }
-      Adapter(String key) { this(key, null, 0, ...); }   ← convenience
+    Generate valid constructors for an abstract class adapter subclass.
     """
-    lines = []
-    if has_no_arg:
-        lines += [
+    lines: List[str] = []
+
+    if has_no_arg or not ctors:
+        lines.extend([
             f"    public {cls_name}(String key) {{",
-            f"        super();",
-            f"        this.key_ = key;",
-            f"        //Log.d(TAG, \"[{cls_name}] created key=\" + key);",
-            f"    }}",
-            f"",
-        ]
+            "        super();",
+            "        this.key_ = key;",
+            "    }",
+            "",
+        ])
     else:
-        first  = ctors[0]
-        params = first.get("params", [])
-        
-        decls = []
-        args  = []
-        nulls = []
-        
-        for p in params:
-            ptype = jni_to_java_type(p.get("jni_type", "jobject"), p.get("java_type", ""))
-            # Use standard string concatenation to avoid f-string nested quote syntax errors
-            pname = p.get("name", "arg" + str(p.get("index", 0)))
-            
-            decls.append(f"{ptype} {pname}")
-            args.append(pname)
-            nulls.append(null_default_for(p))
+        primary_ctor = ctors[0]
+        params = primary_ctor.get("params", [])
 
-        lines += [
-            f"    public {cls_name}(String key, {', '.join(decls)}) {{",
-            f"        super({', '.join(args)});",
-            f"        this.key_ = key;",
-            f"        //Log.d(TAG, \"[{cls_name}] created (full ctor) key=\" + key);",
-            f"    }}",
-            f"",
+        param_decls: List[str] = []
+        forward_args: List[str] = []
+        default_args: List[str] = []
+
+        for idx, param in enumerate(params):
+            param_type = jni_to_java_type(param.get("jni_type", "jobject"), param.get("java_type", ""))
+            param_name = param.get("name", f"arg{idx}")
+
+            param_decls.append(f"{param_type} {param_name}")
+            forward_args.append(param_name)
+            default_args.append(null_default_for(param))
+
+        lines.extend([
+            f"    public {cls_name}(String key, {', '.join(param_decls)}) {{",
+            f"        super({', '.join(forward_args)});",
+            "        this.key_ = key;",
+            "    }",
+            "",
             f"    public {cls_name}(String key) {{",
-            f"        this(key, {', '.join(nulls)});",
-            f"    }}",
-            f"",
-        ]
+            f"        this(key, {', '.join(default_args)});",
+            "    }",
+            "",
+        ])
+
     return lines
 
 
-def _method_overrides(cls_name: str, methods: list, is_interface: bool) -> list:
+def _build_method_overrides(cls_name: str, methods: List[Dict[str, Any]], is_interface: bool) -> List[str]:
     """
-    Emit @Override method stubs for each method.
+    Generate overridden method stubs that dispatch calls to nativeDispatch.
     """
-    lines = []
-    for m in methods:
-        mname    = m.get("name", "unknown")
-        params   = m.get("params", [])
-        ret_jni  = m.get("return_jni", "void")
-        ret_java = jni_to_java_type(ret_jni, m.get("return_java_type", ""))
-        ret_stmt = java_return_default(ret_jni)
+    lines: List[str] = []
 
-        decls = []
-        for p in params:
-            ptype = jni_to_java_type(
-                p.get("jni_type", "jobject"),
-                p.get("java_type", "")
-            )
-            
-            # --- AD-HOC FIX FOR TEXTWATCHER ---
-            # TextWatcher requires CharSequence, but sometimes earlier pipeline 
-            # stages alias CharSequence -> String. We force it back here.
-            if mname in ("beforeTextChanged", "onTextChanged") and ptype == "String" and p.get("index", 0) == 0:
-                ptype = "CharSequence"
-                
-            pname = p.get("name", "arg" + str(p.get("index", 0)))
-            decls.append(f"{ptype} {pname}")
+    for method in methods:
+        method_name = method.get("name", "unknown")
+        params = method.get("params", [])
+        return_jni = method.get("return_jni", "void")
+        return_java = jni_to_java_type(return_jni, method.get("return_java_type", ""))
+        return_stmt = java_return_default(return_jni)
 
-        if params:
-            boxed = [
-                box_for_dispatch(
-                    p.get("jni_type", "jobject"),
-                    p.get("name", "arg" + str(p.get("index", 0)))
-                )
-                for p in params
-            ]
-            args_expr = "new Object[]{ " + ", ".join(boxed) + " }"
+        signature_params: List[str] = []
+        boxing_elements: List[str] = []
+
+        for idx, param in enumerate(params):
+            jni_t = param.get("jni_type", "jobject")
+            java_t = param.get("java_type", "")
+            param_type = jni_to_java_type(jni_t, java_t)
+            param_name = param.get("name", f"arg{idx}")
+
+            # Specific adjustment: TextWatcher callback expects CharSequence, not String
+            if method_name in ("beforeTextChanged", "onTextChanged") and param_type == "String" and idx == 0:
+                param_type = "CharSequence"
+
+            signature_params.append(f"{param_type} {param_name}")
+            boxing_elements.append(box_for_dispatch(jni_t, param_name))
+
+        if boxing_elements:
+            args_expression = "new Object[]{ " + ", ".join(boxing_elements) + " }"
         else:
-            args_expr = "new Object[0]"
+            args_expression = "new Object[0]"
 
-        lines += [
-            f"    @Override",
-            f"    public {ret_java} {mname}({', '.join(decls)}) {{",
-            f"        //Log.d(TAG, \"[{cls_name}] {mname} key=\" + key_"
-            f" + \" params={len(params)}\");",
+        lines.extend([
+            "    @Override",
+            f"    public {return_java} {method_name}({', '.join(signature_params)}) {{",
             f"        StratumInvocationHandler.nativeDispatch(",
-            f"            key_, \"{mname}\", {args_expr});",
-        ]
-        if ret_stmt:
-            lines.append(f"        {ret_stmt}")
-        lines += [
-            f"    }}",
-            f"",
-        ]
+            f'            key_, "{method_name}", {args_expression});',
+        ])
+
+        if return_stmt:
+            lines.append(f"        {return_stmt}")
+
+        lines.extend([
+            "    }",
+            "",
+        ])
+
     return lines
 
 
-def emit_abstract_adapter(fqn: str, data: dict) -> str:
-    """
-    Generate a Java adapter for an abstract class using 'extends'.
-    The adapter subclasses the abstract class and implements all abstract
-    methods by routing calls through StratumInvocationHandler.nativeDispatch.
-    """
-    log_info(f"  Emitting abstract-class adapter: {fqn}")
-    cls_name         = adapter_class_name(fqn)
-    abstract_methods = get_abstract_methods(data)
-    fqn_java         = fqn.replace("$", ".")
+# =============================================================================
+# High-Level Adapter Emitters
+# =============================================================================
 
-    # Find accessible constructors
-    ctors = data.get("constructors", []) or [
-        m for m in data.get("methods", []) if m.get("is_constructor")
+def emit_abstract_adapter(fqn: str, data: Dict[str, Any]) -> str:
+    """Generate Java adapter source code extending an abstract base class."""
+    Logger.info(f"Generating Abstract Class Adapter: {fqn}")
+    cls_name = adapter_class_name(fqn)
+    abstract_methods = get_abstract_methods(data, include_all_non_static=True)
+    java_fqn = fqn.replace("$", ".")
+
+    raw_ctors = data.get("constructors", []) or [
+        m for m in data.get("methods", []) if m.get("is_constructor", False)
     ]
-    # Keep public and protected constructors only
-    accessible = [
-        c for c in ctors
+
+    accessible_ctors = [
+        c for c in raw_ctors
         if c.get("is_public", True) or c.get("is_protected", True)
     ]
-    if ctors and not accessible:
-        raise RuntimeError(
-            f"All constructors are private/package-private for {fqn} — cannot subclass")
-    ctors = accessible
 
-    no_arg     = next((c for c in ctors if not c.get("params", [])), None)
-    has_no_arg = (no_arg is not None) or (not ctors)
+    if raw_ctors and not accessible_ctors:
+        raise RuntimeError(f"Cannot subclass {fqn}: all constructors are private or package-private")
 
-    lines  = _adapter_header(fqn, cls_name, f"extends {fqn_java}")
-    lines += _constructor_block(cls_name, ctors, has_no_arg)
-    lines += _method_overrides(cls_name, abstract_methods, is_interface=False)
-    lines += _adapter_footer(cls_name)
+    has_no_arg = any(len(c.get("params", [])) == 0 for c in accessible_ctors) or not accessible_ctors
 
-    log_ok(f"    abstract adapter: {cls_name} ({len(abstract_methods)} overrides)")
-    return "\n".join(lines)
+    code_lines: List[str] = []
+    code_lines.extend(_build_adapter_header(fqn, cls_name, f"extends {java_fqn}"))
+    code_lines.extend(_build_constructor_block(cls_name, accessible_ctors, has_no_arg))
+    code_lines.extend(_build_method_overrides(cls_name, abstract_methods, is_interface=False))
+    code_lines.extend(_build_adapter_footer(cls_name))
+
+    Logger.ok(f"Compiled abstract adapter: {cls_name} ({len(abstract_methods)} methods)")
+    return "\n".join(code_lines)
 
 
-def emit_interface_adapter(fqn: str, data: dict) -> str:
-    """
-    Generate a Java adapter for an interface using 'implements'.
-    Interfaces have no super() to call so the constructor is simple.
-    All interface methods are implemented and route through nativeDispatch.
-    """
-    log_info(f"  Emitting interface adapter: {fqn}")
-    cls_name      = adapter_class_name(fqn)
-    iface_methods = get_interface_methods(data)
-    fqn_java      = fqn.replace("$", ".")
+def emit_interface_adapter(fqn: str, data: Dict[str, Any]) -> str:
+    """Generate Java adapter source code implementing an interface."""
+    Logger.info(f"Generating Interface Adapter: {fqn}")
+    cls_name = adapter_class_name(fqn)
+    interface_methods = get_interface_methods(data)
+    java_fqn = fqn.replace("$", ".")
 
-    lines  = _adapter_header(fqn, cls_name, f"implements {fqn_java}")
-    lines += [
+    code_lines: List[str] = []
+    code_lines.extend(_build_adapter_header(fqn, cls_name, f"implements {java_fqn}"))
+    code_lines.extend([
         f"    public {cls_name}(String key) {{",
-        f"        this.key_ = key;",
-        f"        //Log.d(TAG, \"[{cls_name}] created key=\" + key);",
-        f"    }}",
-        f"",
-    ]
-    lines += _method_overrides(cls_name, iface_methods, is_interface=True)
-    lines += _adapter_footer(cls_name)
+        "        this.key_ = key;",
+        "    }",
+        "",
+    ])
+    code_lines.extend(_build_method_overrides(cls_name, interface_methods, is_interface=True))
+    code_lines.extend(_build_adapter_footer(cls_name))
 
-    log_ok(f"    interface adapter: {cls_name} ({len(iface_methods)} overrides)")
-    return "\n".join(lines)
+    Logger.ok(f"Compiled interface adapter: {cls_name} ({len(interface_methods)} methods)")
+    return "\n".join(code_lines)
 
 
 # =============================================================================
-# JSON patcher
+# JSON Corpus Patcher
 # =============================================================================
 
-def patch_class_json(data: dict, successfully_adapted: set) -> dict:
+def patch_class_json(data: Dict[str, Any], successfully_adapted: Set[str]) -> Dict[str, Any]:
     """
-    Patch Stage 05 JSON files so that params whose java_type matches an
-    adapted class get conversion=abstract_adapter instead of callable_to_proxy.
-    This tells Stage 06 to instantiate the adapter class instead of creating
-    a dynamic proxy.
+    Patch a single class JSON so that parameters expecting an adapted class
+    are marked with `conversion: abstract_adapter` and carry adapter metadata.
     """
     data = copy.deepcopy(data)
 
-    def patch_params(method):
-        changed = False
-        for p in method.get("params", []):
-            jvt = p.get("java_type", "")
-            if jvt and jvt in successfully_adapted:
-                p["conversion"]    = "abstract_adapter"
-                p["needs_proxy"]   = False
-                p["needs_adapter"] = True
-                p["adapter_class"] = adapter_full_class(jvt)
-                p["adapter_jni"]   = adapter_jni(jvt)
-                changed = True
-        if changed:
-            method["needs_proxy"]   = False
-            method["needs_adapter"] = True
-        return method, changed
+    def patch_parameter_list(method_obj: Dict[str, Any]) -> bool:
+        modified = False
+        for param in method_obj.get("params", []):
+            java_type = param.get("java_type", "").replace("$", ".")
+            canonical_type = param.get("java_type", "")
 
-    for key in ("declared_methods", "overridden_methods",
-                "inherited_methods", "constructors", "methods"):
-        data[key] = [patch_params(m)[0] for m in data.get(key, [])]
+            target_match = None
+            if canonical_type in successfully_adapted:
+                target_match = canonical_type
+            elif java_type in successfully_adapted:
+                target_match = java_type
+
+            if target_match:
+                param["conversion"] = "abstract_adapter"
+                param["needs_proxy"] = False
+                param["needs_adapter"] = True
+                param["adapter_class"] = adapter_full_class(target_match)
+                param["adapter_jni"] = adapter_jni(target_match)
+                modified = True
+
+        if modified:
+            method_obj["needs_proxy"] = False
+            method_obj["needs_adapter"] = True
+
+        return modified
+
+    for section_name in ("declared_methods", "overridden_methods", "inherited_methods", "constructors", "methods"):
+        if section_name in data:
+            data[section_name] = [
+                m if not patch_parameter_list(m) else m
+                for m in data[section_name]
+            ]
+
     return data
 
 
 # =============================================================================
-# Targets file loader
+# Configuration & Targets Loader
 # =============================================================================
 
-def load_targets(targets_file: Path) -> tuple:
+def load_targets(targets_path: Path) -> Tuple[bool, List[str], List[str]]:
     """
     Load 05_5_abstract/targets.json.
-    Returns (filter_enabled, seed_fqns, avoid_fqns).
-    Creates a starter file if none exists.
+    If none exists, create a default file containing common callback targets.
     """
-    print_section("Loading targets.json")
-    default = {
+    Logger.section("Loading Adapter Configuration")
+    default_config = {
         "enabled": True,
-        "avoid":   [],
+        "avoid": [
+            "android.app.admin.NetworkEvent"
+        ],
         "targets": [
             {"fqn": "android.hardware.camera2.CameraDevice$StateCallback"},
             {"fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback"},
+            {"fqn": "android.hardware.camera2.CameraCaptureSession$CaptureCallback"},
+            {"fqn": "android.view.TextureView$SurfaceTextureListener"},
+            {"fqn": "android.view.SurfaceHolder$Callback"},
+            {"fqn": "android.widget.SeekBar$OnSeekBarChangeListener"},
+            {"fqn": "android.widget.AdapterView$OnItemSelectedListener"},
+            {"fqn": "android.text.TextWatcher"},
+            {"fqn": "android.content.DialogInterface$OnClickListener"},
+            {"fqn": "android.content.DialogInterface$OnDismissListener"},
+            {"fqn": "android.content.DialogInterface$OnCancelListener"},
+            {"fqn": "android.hardware.SensorEventListener"},
+            {"fqn": "android.location.LocationListener"},
+            {"fqn": "android.media.ImageReader$OnImageAvailableListener"},
+            {"fqn": "android.webkit.WebViewClient"},
+            {"fqn": "android.webkit.WebChromeClient"},
+            {"fqn": "android.view.View$OnLongClickListener"},
         ],
     }
 
-    if not targets_file.exists():
-        log_info(f"targets.json not found — creating starter at {targets_file}")
-        targets_file.parent.mkdir(parents=True, exist_ok=True)
-        targets_file.write_text(json.dumps(default, indent=2), encoding="utf-8")
-        log_ok(f"Starter targets created: {targets_file}")
-        return True, [], default["avoid"]
+    if not targets_path.exists():
+        Logger.info(f"Target configuration not found. Creating default: {targets_path}")
+        targets_path.parent.mkdir(parents=True, exist_ok=True)
+        targets_path.write_text(json.dumps(default_config, indent=2), encoding="utf-8")
+        seeds = [t["fqn"] for t in default_config["targets"] if t.get("fqn")]
+        return True, seeds, default_config["avoid"]
 
-    log_info(f"Loading: {targets_file}")
-    raw     = json.loads(targets_file.read_text(encoding="utf-8"))
-    enabled = bool(raw.get("enabled", False))
-    seeds   = [t["fqn"] for t in raw.get("targets", []) if t.get("fqn")]
-    avoids  = raw.get("avoid", [])
+    Logger.info(f"Reading target configuration from: {targets_path}")
+    content = json.loads(targets_path.read_text(encoding="utf-8"))
+    enabled = bool(content.get("enabled", False))
+    seeds = [t["fqn"] for t in content.get("targets", []) if t.get("fqn")]
+    avoids = content.get("avoid", [])
 
-    log_info(f"  enabled={enabled}  seeds={len(seeds)}  avoids={len(avoids)}")
+    Logger.info(f"Configuration loaded: enabled={enabled}, seeds={len(seeds)}, avoid={len(avoids)}")
     return enabled, seeds, avoids
 
 
-# =============================================================================
-# FQN resolver — handles dot vs dollar inner-class notation
-# =============================================================================
-
-def build_fqn_resolver(registry: dict):
+def build_fqn_normalizer(registry: Dict[str, Any]):
     """
-    Returns a resolve(fqn) function that maps user-supplied FQNs
-    (possibly using dots for inner classes) to canonical registry FQNs
-    (which use $ for inner classes).
-
-    Example:
-      "android.hardware.camera2.CameraDevice.StateCallback"
-      →  "android.hardware.camera2.CameraDevice$StateCallback"
+    Create a mapping helper to resolve inner-class notation differences
+    (e.g., matching 'android.view.View.OnClickListener' to 'android.view.View$OnClickListener').
     """
-    dot_to_dollar = {f.replace("$", "."): f for f in registry}
+    alias_map: Dict[str, str] = {}
+    for canonical_fqn in registry:
+        dotted = canonical_fqn.replace("$", ".")
+        alias_map[canonical_fqn] = canonical_fqn
+        alias_map[dotted] = canonical_fqn
 
-    def resolve(fqn: str):
-        if fqn in registry:
-            return fqn
-        return dot_to_dollar.get(fqn)
+    def resolve(name: str) -> Optional[str]:
+        return alias_map.get(name)
 
     return resolve
 
 
 # =============================================================================
-# Main
+# Main Program Pipeline
 # =============================================================================
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Stratum Stage 05.5 — Abstract + Interface Adapter Generator")
-    ap.add_argument("--input",       required=True,
-                    help="Path to 05_resolve/output/ (Stage 05 enriched JSONs)")
-    ap.add_argument("--output",      required=True,
-                    help="Path to 05_5_abstract/output/")
-    ap.add_argument("--output-java", default=None, dest="output_java",
-                    help="Override Java output dir (default: output/java/com/stratum/adapters/)")
-    ap.add_argument("--mode",        choices=["on", "off"], default="off",
-                    help="on=generate adapters, off=passthrough copy")
-    args = ap.parse_args()
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Stratum Pipeline Stage 05.5 — Abstract & Interface Adapter Generator"
+    )
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="Directory containing Stage 05 Pass 1 JSON files (05_resolve/output/)"
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Root output directory for Stage 05.5 (05_5_abstract/output/)"
+    )
+    parser.add_argument(
+        "--output-java",
+        default=None,
+        dest="output_java",
+        help="Override output directory for generated .java files"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["on", "off"],
+        default="off",
+        help="Set to 'on' to generate adapters; 'off' executes a passthrough copy"
+    )
+    args = parser.parse_args()
 
-    print_header("STRATUM PIPELINE — STAGE 05.5 (ABSTRACT + INTERFACE ADAPTERS)")
-    log_info(f"Mode   : {args.mode.upper()}")
-    log_info(f"Input  : {args.input}")
-    log_info(f"Output : {args.output}")
+    start_timestamp = time.time()
+    Logger.header("STRATUM PIPELINE — STAGE 05.5 (ADAPTER GENERATION)")
+    Logger.info(f"Execution Mode : {args.mode.upper()}")
+    Logger.info(f"Input Path     : {args.input}")
+    Logger.info(f"Output Path    : {args.output}")
 
-    input_dir  = Path(args.input)
+    input_dir = Path(args.input)
     output_dir = Path(args.output)
 
     if not input_dir.exists():
-        log_error(f"Input dir not found: {input_dir}")
+        Logger.error(f"Input directory does not exist: {input_dir}")
         sys.exit(1)
 
     patched_dir = output_dir / "patched"
-    java_dir    = (Path(args.output_java) if args.output_java
-                   else output_dir / "java" / "com" / "stratum" / "adapters")
+    if args.output_java:
+        java_out_dir = Path(args.output_java)
+    else:
+        java_out_dir = output_dir / "java" / "com" / "stratum" / "adapters"
 
     patched_dir.mkdir(parents=True, exist_ok=True)
-    java_dir.mkdir(parents=True, exist_ok=True)
+    java_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── MODE OFF: passthrough copy ────────────────────────────────────────────
+    # ── PASSTHROUGH MODE ──────────────────────────────────────────────────────
     if args.mode == "off":
-        print_section("Passthrough mode")
+        Logger.section("Passthrough Mode Active")
+        Logger.info("Copying input files without modifications...")
         if patched_dir.exists():
             shutil.rmtree(patched_dir)
         shutil.copytree(input_dir, patched_dir)
-        log_ok(f"Copied {input_dir} → {patched_dir}")
-        manifest = {"mode": "off", "adapter_count": 0, "adapters": []}
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8")
-        print_header("STAGE 05.5 COMPLETE — PASSTHROUGH")
+
+        manifest = {
+            "mode": "off",
+            "adapter_count": 0,
+            "adapters": [],
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        Logger.header("STAGE 05.5 COMPLETE (PASSTHROUGH)")
         return
 
-    # ── MODE ON: generate adapters ────────────────────────────────────────────
+    # ── ADAPTER GENERATION MODE ───────────────────────────────────────────────
     registry = load_registry(input_dir)
     if not registry:
-        log_error("Empty registry — did Stage 05 succeed?")
+        Logger.error("Class registry is empty. Please verify Stage 05 output.")
         sys.exit(1)
 
-    resolve = build_fqn_resolver(registry)
+    normalizer = build_fqn_normalizer(registry)
+    targets_config_path = Path("05_5_abstract") / "targets.json"
+    filter_enabled, raw_seeds, raw_avoids = load_targets(targets_config_path)
 
-    targets_file = Path("05_5_abstract") / "targets.json"
-    filter_enabled, raw_seeds, raw_avoids = load_targets(targets_file)
+    resolved_seeds: List[str] = []
+    for raw in raw_seeds:
+        norm = normalizer(raw)
+        if norm:
+            resolved_seeds.append(norm)
+        else:
+            Logger.warn(f"Target seed could not be resolved in registry: {raw}")
 
-    seed_fqns  = [r for r in (resolve(f) for f in raw_seeds)  if r]
-    avoid_fqns = {r for r in (resolve(f) for f in raw_avoids) if r}
+    resolved_avoids: Set[str] = set()
+    for raw in raw_avoids:
+        norm = normalizer(raw)
+        if norm:
+            resolved_avoids.add(norm)
 
-    # ── Determine what to adapt ───────────────────────────────────────────────
-    all_abstracts = detect_abstract_classes(registry)
+    all_abstract_candidates = detect_abstract_classes(registry, resolved_seeds)
 
     if filter_enabled:
-        # Only process what's explicitly listed in targets.json
-        abstract_targets  = [f for f in seed_fqns if f in set(all_abstracts)]
-        interface_targets = detect_interface_targets(registry, seed_fqns)
+        abstract_targets = [fqn for fqn in resolved_seeds if fqn in set(all_abstract_candidates)]
+        interface_targets = detect_interface_targets(registry, resolved_seeds)
     else:
-        # Process all abstract classes (minus avoids) + seeded interfaces
-        abstract_targets  = [f for f in all_abstracts if f not in avoid_fqns]
-        interface_targets = detect_interface_targets(registry, seed_fqns)
+        abstract_targets = [fqn for fqn in all_abstract_candidates if fqn not in resolved_avoids]
+        interface_targets = detect_interface_targets(registry, resolved_seeds)
 
-    # Merge, keeping order and avoiding duplicates
-    to_adapt = abstract_targets + [
-        f for f in interface_targets if f not in abstract_targets
-    ]
+    # Combine unique targets while preserving ordering
+    combined_targets: List[str] = []
+    for fqn in abstract_targets + interface_targets:
+        if fqn not in combined_targets:
+            combined_targets.append(fqn)
 
-    log_info(f"Total to adapt: {len(to_adapt)}  "
-             f"(abstract={len(abstract_targets)}, interface={len(interface_targets)})")
+    Logger.info(f"Selected {len(combined_targets)} classes for adapter generation "
+                f"(Abstract: {len(abstract_targets)}, Interface: {len(interface_targets)})")
 
-    if not to_adapt:
-        log_warn("Nothing to adapt — passthrough")
+    if not combined_targets:
+        Logger.warn("No targets selected. Operating as passthrough.")
         if patched_dir.exists():
             shutil.rmtree(patched_dir)
         shutil.copytree(input_dir, patched_dir)
-        manifest = {"mode": "on", "adapter_count": 0, "adapters": []}
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest = {
+            "mode": "on",
+            "adapter_count": 0,
+            "adapters": [],
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return
 
-    collisions = check_name_collisions(to_adapt, registry)
-    if collisions:
+    collision_errors = check_name_collisions(combined_targets, registry)
+    if collision_errors:
+        Logger.error("Aborting due to name collisions.")
         sys.exit(1)
 
-    # ── Generate Java adapter sources ─────────────────────────────────────────
-    print_section("Generating Java adapter sources")
-    generated            = []
-    failed               = []
-    successfully_adapted = set()
+    # ── GENERATE JAVA FILES ───────────────────────────────────────────────────
+    Logger.section("Emitting Java Source Files")
+    generated_records: List[Dict[str, str]] = []
+    failed_records: List[Dict[str, str]] = []
+    successfully_adapted: Set[str] = set()
 
-    for i, fqn in enumerate(to_adapt, 1):
-        data, _  = registry[fqn]
+    for idx, fqn in enumerate(combined_targets, 1):
+        data, _ = registry[fqn]
         is_iface = data.get("is_interface", False)
-        kind     = "interface" if is_iface else "abstract"
-        log_info(f"[{i}/{len(to_adapt)}] ({kind}) {fqn}")
+        kind = "interface" if is_iface else "abstract"
+
+        Logger.info(f"[{idx}/{len(combined_targets)}] ({kind.upper()}) {fqn}")
 
         try:
-            java_src = (emit_interface_adapter(fqn, data)
-                        if is_iface
-                        else emit_abstract_adapter(fqn, data))
+            if is_iface:
+                java_source = emit_interface_adapter(fqn, data)
+            else:
+                java_source = emit_abstract_adapter(fqn, data)
 
-            cls_name  = adapter_class_name(fqn)
-            java_file = java_dir / f"{cls_name}.java"
-            java_file.write_text(java_src, encoding="utf-8")
+            cls_name = adapter_class_name(fqn)
+            target_java_file = java_out_dir / f"{cls_name}.java"
+            target_java_file.write_text(java_source, encoding="utf-8")
 
-            generated.append({
-                "fqn":           fqn,
-                "kind":          kind,
+            generated_records.append({
+                "fqn": fqn,
+                "kind": kind,
                 "adapter_class": adapter_full_class(fqn),
-                "adapter_jni":   adapter_jni(fqn),
+                "adapter_jni": adapter_jni(fqn),
+                "file": target_java_file.name,
             })
             successfully_adapted.add(fqn)
-            log_ok(f"  → {cls_name}.java")
+            Logger.ok(f"  -> Generated: {target_java_file.name}")
 
-        except Exception as e:
-            log_warn(f"  SKIP {fqn}: {e}")
-            failed.append({"fqn": fqn, "error": str(e)})
+        except Exception as err:
+            Logger.warn(f"  Failed generating adapter for {fqn}: {err}")
+            failed_records.append({"fqn": fqn, "error": str(err)})
 
-    # ── Patch Stage 05 JSONs ──────────────────────────────────────────────────
-    print_section("Patching Stage 05 JSONs")
+    # ── PATCH RESOLVED JSONS ──────────────────────────────────────────────────
+    Logger.section("Patching Stage 05 JSON Files")
     patched_count = 0
-    all_json      = [
-        f for f in sorted(input_dir.rglob("*.json"))
-        if f.name not in SKIP_SUMMARIES
+    all_json_files = [
+        p for p in sorted(input_dir.rglob("*.json"))
+        if p.name not in SKIP_SUMMARIES
     ]
 
-    for jf in all_json:
+    for json_file in all_json_files:
         try:
-            data     = json.loads(jf.read_text(encoding="utf-8"))
-            rel      = jf.relative_to(input_dir)
-            out_path = patched_dir / rel
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            orig     = json.dumps(data, sort_keys=True)
-            patched  = patch_class_json(data, successfully_adapted)
-            out_path.write_text(json.dumps(patched, indent=2), encoding="utf-8")
-            if json.dumps(patched, sort_keys=True) != orig:
+            raw_data = json.loads(json_file.read_text(encoding="utf-8"))
+            rel_path = json_file.relative_to(input_dir)
+            out_file = patched_dir / rel_path
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+
+            original_repr = json.dumps(raw_data, sort_keys=True)
+            patched_data = patch_class_json(raw_data, successfully_adapted)
+            new_repr = json.dumps(patched_data, sort_keys=True)
+
+            out_file.write_text(json.dumps(patched_data, indent=2), encoding="utf-8")
+            if original_repr != new_repr:
                 patched_count += 1
-        except Exception as e:
-            log_warn(f"  Error patching {jf.name}: {e}")
 
-    # Copy summary files unchanged
-    for name in SKIP_SUMMARIES:
-        src = input_dir / name
-        if src.exists():
-            shutil.copy2(src, patched_dir / name)
+        except Exception as err:
+            Logger.warn(f"Error patching {json_file.name}: {err}")
 
-    # ── Manifest ──────────────────────────────────────────────────────────────
-    manifest = {
-        "mode":               "on",
-        "adapter_count":      len(generated),
-        "failed_gen_count":   len(failed),
+    # Copy summaries forward to the patched directory
+    for summary_name in SKIP_SUMMARIES:
+        source_summary = input_dir / summary_name
+        if source_summary.exists():
+            shutil.copy2(source_summary, patched_dir / summary_name)
+
+    # ── MANIFEST & SUMMARY ────────────────────────────────────────────────────
+    manifest_data = {
+        "mode": "on",
+        "generated_count": len(generated_records),
+        "failed_count": len(failed_records),
         "patched_json_count": patched_count,
-        "adapters":           generated,
-        "failed_gen":         failed,
+        "adapters": generated_records,
+        "failures": failed_records,
+        "elapsed_seconds": round(time.time() - start_timestamp, 2),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    (output_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8")
+    (output_dir / "manifest.json").write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
-    print_header("STAGE 05.5 COMPLETE")
-    log_info(f"Adapters generated : {len(generated)}")
-    log_info(f"  — abstract       : {len(abstract_targets)}")
-    log_info(f"  — interface      : {len(interface_targets)}")
-    log_info(f"JSONs patched      : {patched_count}")
-    log_info(f"Skipped/Failed     : {len(failed)}")
-    log_info(f"Java output dir    : {java_dir}")
-    print()
-    print("NEXT STEPS:")
-    print(f"  Run Stage 06 with:  --input {patched_dir}")
+    Logger.header("STAGE 05.5 EXECUTION SUMMARY")
+    Logger.info(f"Adapters Generated : {len(generated_records)}")
+    Logger.info(f"  - Abstract       : {len([r for r in generated_records if r['kind'] == 'abstract'])}")
+    Logger.info(f"  - Interface      : {len([r for r in generated_records if r['kind'] == 'interface'])}")
+    Logger.info(f"JSON Files Patched : {patched_count}")
+    Logger.info(f"Failures / Skips   : {len(failed_records)}")
+    Logger.info(f"Java Source Dir    : {java_out_dir.resolve()}")
+    Logger.info(f"Patched JSON Dir   : {patched_dir.resolve()}")
+    Logger.ok(f"Stage 05.5 completed successfully in {manifest_data['elapsed_seconds']}s")
 
 
 if __name__ == "__main__":

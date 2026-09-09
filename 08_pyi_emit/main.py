@@ -92,7 +92,7 @@ from pathlib import Path
 CALL_DISPATCH = {
     0: "call_v", 1: "call_z", 2: "call_i", 3: "call_i", 4: "call_i",
     5: "call_i", 6: "call_j", 7: "call_d", 8: "call_d",
-    9: "call_str", 10: "call_o",
+    9: "call_str", 10: "call_o", 11: "call_arr",
 }
 FIELD_GET_DISPATCH = {
     1: "field_get_z", 2: "field_get_i", 3: "field_get_i",
@@ -105,6 +105,8 @@ _CAMEL_RE1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_RE2 = re.compile(r"([a-z0-9])([A-Z])")
 
 
+import keyword
+
 def camel_to_snake(name: str) -> str:
     """
     setText        -> set_text
@@ -115,8 +117,11 @@ def camel_to_snake(name: str) -> str:
     s1 = _CAMEL_RE1.sub(r"\1_\2", name)
     s2 = _CAMEL_RE2.sub(r"\1_\2", s1)
     out = s2.lower()
-    if out in ("class", "def", "return", "import", "from", "global", "id",
-               "type", "list", "dict", "str", "int", "float", "object"):
+    out = re.sub(r"[^a-zA-Z0-9_]", "_", out)
+    out = re.sub(r"_+", "_", out).strip("_") or "_unknown"
+    if out and out[0].isdigit():
+        out = "_" + out
+    if keyword.iskeyword(out) or out in ("id", "type", "list", "dict", "str", "int", "float", "object"):
         out += "_"
     return out
 
@@ -129,7 +134,10 @@ def sanitize_id(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_]", "_", s)
     if s and s[0].isdigit():
         s = "_" + s
-    return re.sub(r"_+", "_", s).strip("_") or "_unknown"
+    s = re.sub(r"_+", "_", s).strip("_") or "_unknown"
+    if keyword.iskeyword(s):
+        s += "_"
+    return s
 
 
 def fqn_to_module_parts(fqn: str) -> tuple:
@@ -210,14 +218,12 @@ def build_method_dispatcher(group: list, class_id: int) -> list:
 
     def emit_call(m, indent="        "):
         slot = m["slot"]
-        fn = CALL_DISPATCH.get(m.get("ret_type_id", 10), "call_o")
+        ret_id = m.get("ret_type_id", 10)
+        fn = CALL_DISPATCH.get(ret_id, "call_o")
         target = "0" if is_static else "self._ptr"
-        if m.get("ret_type_id") == 10 and m.get("return_fqn"):
-            # Object return with a statically-known Java type: resolve
-            # the wrapper class LAZILY at call time via _wrap_instance(),
-            # never at codegen time — this is what keeps "class depends
-            # on a class that might be excluded from this build" from
-            # ever becoming a crash on the Python side.
+        if ret_id == 11:
+            return f"{indent}return _core.{fn}({target}, {class_id}, {slot}, *args)"
+        if ret_id == 10 and m.get("return_fqn"):
             return (f"{indent}_ptr = _core.{fn}({target}, {class_id}, {slot}, *args)\n"
                     f"{indent}return _wrap_instance(_ptr, '{m['return_fqn']}')")
         return f"{indent}return _core.{fn}({target}, {class_id}, {slot}, *args)"
@@ -260,7 +266,9 @@ def build_field_accessors(fields: list, class_id: int) -> list:
     for f in fields:
         fslot = f.get("slot", 0)
         fget = FIELD_GET_DISPATCH.get(f.get("ret_type_id", 10), "field_get_o")
-        fname = f.get("name", "")
+        # Sanitize field names so internal compiler fields like $assertionsDisabled
+        # don't produce invalid Python syntax with '$' characters
+        fname = sanitize_id(f.get("name", "unknown"))
         is_static = f.get("is_static", False)
         prefix = "sf" if is_static else "f"
         target = "0" if is_static else "self._ptr"
@@ -401,7 +409,7 @@ def emit_pyi_stub(data: dict) -> str:
                 lines.append(f"    {snake_name} = {py_name}")
 
     for f in data.get("fields", []):
-        fname = f.get("name", "")
+        fname = sanitize_id(f.get("name", "unknown"))
         is_static = f.get("is_static", False)
         prefix = "sf" if is_static else "f"
         if is_static:
