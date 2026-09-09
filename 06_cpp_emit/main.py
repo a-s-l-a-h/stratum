@@ -987,6 +987,9 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     jargs[i].l = nullptr;
                 } else if (nb::hasattr(item, "_ptr")) {
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
+                } else if (nb::isinstance<nb::int_>(item)) {
+                    // FIX: Allow integer pointer (e.g. from sf_get_*) to pass as jobject
+                    jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item);
                 } else if (nb::isinstance<nb::str>(item)) {
                     jstring js = stratum_str_to_jstring(env, nb::cast<std::string>(item));
                     jargs[i].l = js;
@@ -1359,6 +1362,30 @@ void field_set_i(int64_t ptr, uint32_t class_id, uint32_t slot, int64_t val) {
     else env->SetIntField((jobject)(uintptr_t)ptr, fid, (jint)val);
     stratum_check_java_exc(env);
 }
+
+// ── General-Purpose: Direct ByteBuffer Native Mapping ────────────────────────
+// Zero-copy bridge for audio PCM, camera buffers, MediaCodec, and Bitmaps.
+nb::object bytebuffer_to_memoryview(int64_t ptr) {
+    if (!ptr) return nb::none();
+    JNIEnv* env = get_env();
+    if (!env) return nb::none();
+    jobject bb = (jobject)(uintptr_t)ptr;
+    void* addr = env->GetDirectBufferAddress(bb);
+    if (!addr) return nb::none();
+    jlong cap = env->GetDirectBufferCapacity(bb);
+    if (cap <= 0) return nb::none();
+
+    Py_buffer view;
+    if (PyBuffer_FillInfo(&view, nullptr, addr, (Py_ssize_t)cap, 0, PyBUF_WRITABLE) == -1) {
+        PyErr_Clear();
+        return nb::none();
+    }
+    PyObject* mv = PyMemoryView_FromBuffer(&view);
+    if (!mv) return nb::none();
+    nb::object mvo = nb::borrow(mv);
+    Py_DECREF(mv);
+    return mvo;
+}
 """
 
 # =============================================================================
@@ -1390,6 +1417,7 @@ double field_get_d(int64_t, uint32_t, uint32_t);
 std::string field_get_str(int64_t, uint32_t, uint32_t);
 int64_t field_get_o(int64_t, uint32_t, uint32_t);
 void field_set_i(int64_t, uint32_t, uint32_t, int64_t);
+nb::object bytebuffer_to_memoryview(int64_t);
 
 static std::unordered_map<std::string, nb::callable> g_lifecycle_cbs;
 static std::mutex g_lifecycle_mutex;
@@ -1460,6 +1488,8 @@ NB_MODULE(_stratum, m) {
     m.def("field_get_str", &field_get_str);
     m.def("field_get_o", &field_get_o);
     m.def("field_set_i", &field_set_i);
+
+    m.def("bytebuffer_to_memoryview", &bytebuffer_to_memoryview);
 
     m.def("get_activity_ptr", []() -> int64_t {
         std::lock_guard<std::mutex> lk(g_activity_mutex);

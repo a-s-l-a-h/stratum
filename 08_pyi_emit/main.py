@@ -276,10 +276,18 @@ def build_field_accessors(fields: list, class_id: int) -> list:
         if is_static:
             lines.append("    @staticmethod")
             lines.append(f"    def {prefix}_get_{fname}():")
-            lines.append(f"        return _core.{fget}({target}, {class_id}, {fslot})")
+            if fget == "field_get_o":
+                lines.append(f"        _ptr = _core.{fget}({target}, {class_id}, {fslot})")
+                lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
+            else:
+                lines.append(f"        return _core.{fget}({target}, {class_id}, {fslot})")
         else:
             lines.append(f"    def {prefix}_get_{fname}(self):")
-            lines.append(f"        return _core.{fget}(self._ptr, {class_id}, {fslot})")
+            if fget == "field_get_o":
+                lines.append(f"        _ptr = _core.{fget}(self._ptr, {class_id}, {fslot})")
+                lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
+            else:
+                lines.append(f"        return _core.{fget}(self._ptr, {class_id}, {fslot})")
         lines.append("")
 
         # Only int-family fields get a generated setter (matches
