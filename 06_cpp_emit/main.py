@@ -322,6 +322,7 @@ jclass       find_class(JNIEnv* env, const char* name); // FindClass, falls
 void         store_callback(const std::string& key, nb::callable fn);
 nb::callable get_callback(const std::string& key);
 void         remove_callback(const std::string& key);
+size_t       stratum_callback_count();
 
 // Checks for a pending Java exception. If present: clears it, extracts the
 // message, and throws std::runtime_error (which nanobind turns into a
@@ -430,9 +431,25 @@ jclass find_class(JNIEnv* env, const char* name) {
     return nullptr;
 }
 
+static constexpr size_t STRATUM_MAX_CALLBACKS = 10000;
+
 void store_callback(const std::string& key, nb::callable fn) {
     std::lock_guard<std::mutex> lock(g_callback_mutex);
     g_callbacks[key] = std::make_shared<nb::callable>(std::move(fn));
+    size_t sz = g_callbacks.size();
+    if (sz > STRATUM_MAX_CALLBACKS && sz % 1000 == 0) {
+        // g_callbacks only grows — every 'a'/'p' argument allocates a new
+        // key that is never auto-removed (the Java-side adapter's
+        // lifetime isn't tracked). This warns in logcat instead of
+        // silently leaking. Call stratum.remove_callback(key) if you
+        // know a listener is no longer needed.
+        LOGW("Stratum: g_callbacks has grown to %zu entries — possible leak.", sz);
+    }
+}
+
+size_t stratum_callback_count() {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    return g_callbacks.size();
 }
 nb::callable get_callback(const std::string& key) {
     std::lock_guard<std::mutex> lock(g_callback_mutex);
@@ -540,27 +557,106 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
     if (!fn.is_valid()) { LOGW("nativeDispatch: no callback bound for %s", routed_key.c_str()); return nullptr; }
 
     nb::gil_scoped_acquire acquire;
-    JniLocalFrame frame(env, 32); // v9: bound local refs created while unpacking args
+    JniLocalFrame frame(env, 32);
+
+    // Cache primitive wrapper classes once. Without unboxing, a Java
+    // caller passing e.g. onProgressChanged(SeekBar, int, boolean) hands
+    // Python opaque object pointers instead of a real int/bool.
+    static jclass s_int_cls = nullptr, s_bool_cls = nullptr,
+                  s_long_cls = nullptr, s_dbl_cls = nullptr, s_flt_cls = nullptr;
+    if (!s_int_cls)  { jclass c = env->FindClass("java/lang/Integer");  s_int_cls  = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (!s_bool_cls) { jclass c = env->FindClass("java/lang/Boolean");  s_bool_cls = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (!s_long_cls) { jclass c = env->FindClass("java/lang/Long");     s_long_cls = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (!s_dbl_cls)  { jclass c = env->FindClass("java/lang/Double");   s_dbl_cls  = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (!s_flt_cls)  { jclass c = env->FindClass("java/lang/Float");    s_flt_cls  = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+
+    nb::object py_result;
     try {
         jsize len = args ? env->GetArrayLength(args) : 0;
-        if (len == 0) { fn(); }
-        else {
+        if (len == 0) {
+            py_result = fn();
+        } else {
             nb::list py_args;
             for (jsize i = 0; i < len; ++i) {
                 jobject elem = env->GetObjectArrayElement(args, i);
-                if (!elem) py_args.append(nb::none());
-                else if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class))
+                if (!elem) { py_args.append(nb::none()); continue; }
+
+                if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class)) {
                     py_args.append(nb::str(stratum_jstring_to_str(env, elem).c_str()));
-                else {
+                } else if (env->IsInstanceOf(elem, s_int_cls)) {
+                    jmethodID mid = env->GetMethodID(s_int_cls, "intValue", "()I");
+                    py_args.append(nb::int_((int64_t)env->CallIntMethod(elem, mid)));
+                    env->DeleteLocalRef(elem);
+                } else if (env->IsInstanceOf(elem, s_bool_cls)) {
+                    jmethodID mid = env->GetMethodID(s_bool_cls, "booleanValue", "()Z");
+                    py_args.append(nb::bool_(env->CallBooleanMethod(elem, mid) != JNI_FALSE));
+                    env->DeleteLocalRef(elem);
+                } else if (env->IsInstanceOf(elem, s_long_cls)) {
+                    jmethodID mid = env->GetMethodID(s_long_cls, "longValue", "()J");
+                    py_args.append(nb::int_((int64_t)env->CallLongMethod(elem, mid)));
+                    env->DeleteLocalRef(elem);
+                } else if (env->IsInstanceOf(elem, s_dbl_cls)) {
+                    jmethodID mid = env->GetMethodID(s_dbl_cls, "doubleValue", "()D");
+                    py_args.append(nb::float_((double)env->CallDoubleMethod(elem, mid)));
+                    env->DeleteLocalRef(elem);
+                } else if (env->IsInstanceOf(elem, s_flt_cls)) {
+                    jmethodID mid = env->GetMethodID(s_flt_cls, "floatValue", "()F");
+                    py_args.append(nb::float_((double)env->CallFloatMethod(elem, mid)));
+                    env->DeleteLocalRef(elem);
+                } else {
                     jobject gref = env->NewGlobalRef(elem);
                     env->DeleteLocalRef(elem);
                     py_args.append(nb::cast((int64_t)(uintptr_t)gref));
                 }
             }
-            fn(*nb::tuple(py_args));
+            py_result = fn(*nb::tuple(py_args));
         }
+    } catch (nb::python_error& e) {
+        // Propagate to Java instead of silently swallowing it — a
+        // crashing Python callback previously looked to Java like it
+        // succeeded and returned null.
+        std::string msg = e.what();
+        e.restore();
+        PyErr_Clear();
+        LOGE("nativeDispatch: Python callback raised: %s", msg.c_str());
+        if (!env->ExceptionCheck()) {
+            jclass rex = env->FindClass("java/lang/RuntimeException");
+            if (rex) {
+                env->ThrowNew(rex, (std::string("[Stratum] Python callback error: ") + msg).c_str());
+                env->DeleteLocalRef(rex);
+            } else {
+                env->ExceptionClear();
+            }
+        }
+        return nullptr;
     } catch (const std::exception& e) {
-        LOGE("nativeDispatch Python execution error: %s", e.what());
+        LOGE("nativeDispatch: native error: %s", e.what());
+        return nullptr;
+    }
+
+    // Convert the Python return value into a boxed Java object so
+    // callbacks with a non-void return type (onTouch, onKey,
+    // onLongClick, Comparator.compare, ...) get a real value.
+    // NOTE: this only takes effect once StratumInvocationHandler.java's
+    // invoke() actually forwards it — see the companion Java patch.
+    if (!py_result || py_result.is_none()) return nullptr;
+    if (nb::isinstance<nb::bool_>(py_result)) {
+        jmethodID valueOf = env->GetStaticMethodID(s_bool_cls, "valueOf", "(Z)Ljava/lang/Boolean;");
+        return env->CallStaticObjectMethod(s_bool_cls, valueOf, nb::cast<bool>(py_result) ? JNI_TRUE : JNI_FALSE);
+    }
+    if (nb::isinstance<nb::int_>(py_result)) {
+        jmethodID valueOf = env->GetStaticMethodID(s_int_cls, "valueOf", "(I)Ljava/lang/Integer;");
+        return env->CallStaticObjectMethod(s_int_cls, valueOf, (jint)nb::cast<int64_t>(py_result));
+    }
+    if (nb::isinstance<nb::float_>(py_result)) {
+        jmethodID valueOf = env->GetStaticMethodID(s_dbl_cls, "valueOf", "(D)Ljava/lang/Double;");
+        return env->CallStaticObjectMethod(s_dbl_cls, valueOf, (jdouble)nb::cast<double>(py_result));
+    }
+    if (nb::isinstance<nb::str>(py_result)) {
+        return stratum_str_to_jstring(env, nb::cast<std::string>(py_result));
+    }
+    if (nb::hasattr(py_result, "_ptr")) {
+        return (jobject)(uintptr_t)nb::cast<int64_t>(py_result.attr("_ptr"));
     }
     return nullptr;
 }
@@ -1363,28 +1459,130 @@ void field_set_i(int64_t ptr, uint32_t class_id, uint32_t slot, int64_t val) {
     stratum_check_java_exc(env);
 }
 
+void field_set_z(int64_t ptr, uint32_t class_id, uint32_t slot, bool val) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    jboolean jv = val ? JNI_TRUE : JNI_FALSE;
+    if (cls.fields[slot].is_static) env->SetStaticBooleanField(cls.class_ref, fid, jv);
+    else env->SetBooleanField((jobject)(uintptr_t)ptr, fid, jv);
+    stratum_check_java_exc(env);
+}
+
+void field_set_j(int64_t ptr, uint32_t class_id, uint32_t slot, int64_t val) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    if (cls.fields[slot].is_static) env->SetStaticLongField(cls.class_ref, fid, (jlong)val);
+    else env->SetLongField((jobject)(uintptr_t)ptr, fid, (jlong)val);
+    stratum_check_java_exc(env);
+}
+
+void field_set_d(int64_t ptr, uint32_t class_id, uint32_t slot, double val) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    if (cls.fields[slot].type_id == 7) { // float
+        if (cls.fields[slot].is_static) env->SetStaticFloatField(cls.class_ref, fid, (jfloat)val);
+        else env->SetFloatField((jobject)(uintptr_t)ptr, fid, (jfloat)val);
+    } else {
+        if (cls.fields[slot].is_static) env->SetStaticDoubleField(cls.class_ref, fid, (jdouble)val);
+        else env->SetDoubleField((jobject)(uintptr_t)ptr, fid, (jdouble)val);
+    }
+    stratum_check_java_exc(env);
+}
+
+void field_set_str(int64_t ptr, uint32_t class_id, uint32_t slot, const std::string& val) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    JniLocalFrame _local_frame(env, 8);
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    jstring js = stratum_str_to_jstring(env, val);
+    if (cls.fields[slot].is_static) env->SetStaticObjectField(cls.class_ref, fid, js);
+    else env->SetObjectField((jobject)(uintptr_t)ptr, fid, js);
+    stratum_check_java_exc(env);
+}
+
+void field_set_o(int64_t ptr, uint32_t class_id, uint32_t slot, int64_t val_ptr) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    jobject val = (jobject)(uintptr_t)val_ptr;
+    if (cls.fields[slot].is_static) env->SetStaticObjectField(cls.class_ref, fid, val);
+    else env->SetObjectField((jobject)(uintptr_t)ptr, fid, val);
+    stratum_check_java_exc(env);
+}
+
+// Comparing raw int64 pointer values in Python is NOT identity —
+// two different global refs (e.g. one from a return value, one from a
+// field getter) can point at the same Java object with different
+// jobject handle values. Use real JNI identity comparison instead.
+bool is_same_object(int64_t ptr_a, int64_t ptr_b) {
+    if (!ptr_a && !ptr_b) return true;
+    if (!ptr_a || !ptr_b) return false;
+    JNIEnv* env = get_env();
+    if (!env) return ptr_a == ptr_b;
+    return env->IsSameObject((jobject)(uintptr_t)ptr_a, (jobject)(uintptr_t)ptr_b);
+}
+
 // ── General-Purpose: Direct ByteBuffer Native Mapping ────────────────────────
 // Zero-copy bridge for audio PCM, camera buffers, MediaCodec, and Bitmaps.
 nb::object bytebuffer_to_memoryview(int64_t ptr) {
     if (!ptr) return nb::none();
     JNIEnv* env = get_env();
     if (!env) return nb::none();
+    JniLocalFrame frame(env, 8);
     jobject bb = (jobject)(uintptr_t)ptr;
-    void* addr = env->GetDirectBufferAddress(bb);
-    if (!addr) return nb::none();
-    jlong cap = env->GetDirectBufferCapacity(bb);
-    if (cap <= 0) return nb::none();
 
-    Py_buffer view;
-    if (PyBuffer_FillInfo(&view, nullptr, addr, (Py_ssize_t)cap, 0, PyBUF_WRITABLE) == -1) {
-        PyErr_Clear();
-        return nb::none();
+    void* addr = env->GetDirectBufferAddress(bb);
+    jlong cap = addr ? env->GetDirectBufferCapacity(bb) : 0;
+    if (addr && cap > 0) {
+        Py_buffer view;
+        if (PyBuffer_FillInfo(&view, nullptr, addr, (Py_ssize_t)cap, 0, PyBUF_WRITABLE) == -1) {
+            PyErr_Clear();
+            return nb::none();
+        }
+        PyObject* mv = PyMemoryView_FromBuffer(&view);
+        if (!mv) return nb::none();
+        nb::object mvo = nb::borrow(mv);
+        Py_DECREF(mv);
+        return mvo;
     }
-    PyObject* mv = PyMemoryView_FromBuffer(&view);
-    if (!mv) return nb::none();
-    nb::object mvo = nb::borrow(mv);
-    Py_DECREF(mv);
-    return mvo;
+
+    // Non-direct (heap-backed) ByteBuffer — fall back to copying its
+    // backing byte[] via .array(). Without this, any non-direct buffer
+    // silently returned None instead of usable data.
+    jclass bcls = env->GetObjectClass(bb);
+    jmethodID marr = env->GetMethodID(bcls, "array", "()[B");
+    if (!marr) { env->ExceptionClear(); return nb::none(); }
+    jbyteArray ba = (jbyteArray)env->CallObjectMethod(bb, marr);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nb::none(); }
+    if (!ba) return nb::none();
+    jsize blen = env->GetArrayLength(ba);
+    jbyte* bp = env->GetByteArrayElements(ba, nullptr);
+    nb::bytes result(reinterpret_cast<const char*>(bp), (size_t)blen);
+    env->ReleaseByteArrayElements(ba, bp, JNI_ABORT);
+    return result;
 }
 """
 
@@ -1417,6 +1615,12 @@ double field_get_d(int64_t, uint32_t, uint32_t);
 std::string field_get_str(int64_t, uint32_t, uint32_t);
 int64_t field_get_o(int64_t, uint32_t, uint32_t);
 void field_set_i(int64_t, uint32_t, uint32_t, int64_t);
+void field_set_z(int64_t, uint32_t, uint32_t, bool);
+void field_set_j(int64_t, uint32_t, uint32_t, int64_t);
+void field_set_d(int64_t, uint32_t, uint32_t, double);
+void field_set_str(int64_t, uint32_t, uint32_t, const std::string&);
+void field_set_o(int64_t, uint32_t, uint32_t, int64_t);
+bool is_same_object(int64_t, int64_t);
 nb::object bytebuffer_to_memoryview(int64_t);
 
 static std::unordered_map<std::string, nb::callable> g_lifecycle_cbs;
@@ -1488,6 +1692,14 @@ NB_MODULE(_stratum, m) {
     m.def("field_get_str", &field_get_str);
     m.def("field_get_o", &field_get_o);
     m.def("field_set_i", &field_set_i);
+    m.def("field_set_z", &field_set_z);
+    m.def("field_set_j", &field_set_j);
+    m.def("field_set_d", &field_set_d);
+    m.def("field_set_str", &field_set_str);
+    m.def("field_set_o", &field_set_o);
+    m.def("is_same_object", &is_same_object);
+    m.def("remove_callback", [](const std::string& key) { remove_callback(key); });
+    m.def("stratum_callback_count", []() -> size_t { return stratum_callback_count(); });
 
     m.def("bytebuffer_to_memoryview", &bytebuffer_to_memoryview);
 

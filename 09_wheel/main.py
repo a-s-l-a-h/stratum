@@ -65,6 +65,19 @@ def setContentView(activity, view) -> None:
 
 set_content_view = setContentView
 
+def remove_callback(key: str) -> None:
+    """Release a stored Python callback (listener/adapter) by its key,
+    if you tracked it. Reduces the g_callbacks map growth flagged by the
+    logcat warning that fires once it exceeds ~10,000 live entries."""
+    _core.remove_callback(key)
+
+
+def callback_count() -> int:
+    """Number of Python callbacks currently retained by the native side."""
+    return _core.stratum_callback_count()
+
+
+
 
 def set_log_enabled(enabled: bool) -> None:
     """Toggle runtime logging. Only has any effect if this .so was

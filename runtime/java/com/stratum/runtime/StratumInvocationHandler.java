@@ -21,10 +21,12 @@ public class StratumInvocationHandler implements InvocationHandler {
         if (name.equals("equals")) return proxy == args[0];
 
         // Send the method name to C++ so we can route multi-method interfaces!
-        nativeDispatch(callbackKey, name, args != null ? args : new Object[0]);
-        return null;
+        // Forward whatever C++ computed back to Java — required for any
+        // interface method with a non-void return type. java.lang.reflect
+        // .Proxy throws NullPointerException if invoke() returns null for
+        // a primitive return type, so this can no longer be hardcoded.
+        return nativeDispatch(callbackKey, name, args != null ? args : new Object[0]);
     }
 
-    // FIX: Signature now correctly expects 3 arguments!
-    public static native void nativeDispatch(String key, String method, Object[] args);
+    public static native Object nativeDispatch(String key, String method, Object[] args);
 }

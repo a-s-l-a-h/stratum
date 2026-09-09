@@ -100,6 +100,12 @@ FIELD_GET_DISPATCH = {
     7: "field_get_d", 8: "field_get_d",
     9: "field_get_str", 10: "field_get_o",
 }
+FIELD_SET_DISPATCH = {
+    1: "field_set_z", 2: "field_set_i", 3: "field_set_i",
+    4: "field_set_i", 5: "field_set_i", 6: "field_set_j",
+    7: "field_set_d", 8: "field_set_d",
+    9: "field_set_str", 10: "field_set_o",
+}
 
 _CAMEL_RE1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_RE2 = re.compile(r"([a-z0-9])([A-Z])")
@@ -290,18 +296,23 @@ def build_field_accessors(fields: list, class_id: int) -> list:
                 lines.append(f"        return _core.{fget}(self._ptr, {class_id}, {fslot})")
         lines.append("")
 
-        # Only int-family fields get a generated setter (matches
-        # field_set_i in the engine). Add more setters on both sides
-        # together if mutable String/bool/object fields are needed.
-        if f.get("ret_type_id") in (2, 3, 4, 5) and not f.get("is_final", False):
-            if is_static:
-                lines.append("    @staticmethod")
-                lines.append(f"    def {prefix}_set_{fname}(val):")
-                lines.append(f"        _core.field_set_i({target}, {class_id}, {fslot}, val)")
-            else:
-                lines.append(f"    def {prefix}_set_{fname}(self, val):")
-                lines.append(f"        _core.field_set_i(self._ptr, {class_id}, {fslot}, val)")
-            lines.append("")
+        # Every field type now has a matching engine setter — previously
+        # only int-family fields (ret_type_id 2-5) were writable even
+        # though the engine could always read bool/long/double/String/
+        # object fields.
+        if not f.get("is_final", False):
+            rtid = f.get("ret_type_id", 10)
+            fset = FIELD_SET_DISPATCH.get(rtid)
+            if fset:
+                val_expr = "getattr(val, '_ptr', val) or 0" if rtid == 10 else "val"
+                if is_static:
+                    lines.append("    @staticmethod")
+                    lines.append(f"    def {prefix}_set_{fname}(val):")
+                    lines.append(f"        _core.{fset}({target}, {class_id}, {fslot}, {val_expr})")
+                else:
+                    lines.append(f"    def {prefix}_set_{fname}(self, val):")
+                    lines.append(f"        _core.{fset}(self._ptr, {class_id}, {fslot}, {val_expr})")
+                lines.append("")
     return lines
 
 
@@ -573,7 +584,23 @@ class StratumObject:
         return bool(self._ptr)
 
     def __eq__(self, other) -> bool:
-        return isinstance(other, StratumObject) and self._ptr == other._ptr
+        if not isinstance(other, StratumObject):
+            return NotImplemented
+        if not self._ptr or not other._ptr:
+            return self._ptr == other._ptr
+        # Two different global refs (e.g. one from a method return, one
+        # from a field getter) can point at the same underlying Java
+        # object with different pointer values — compare via JNI identity.
+        return bool(_core.is_same_object(self._ptr, other._ptr))
+
+    def __hash__(self) -> int:
+        # NOTE: defining __eq__ without __hash__ makes a class unhashable
+        # in Python 3 — this was previously missing entirely, so
+        # StratumObject instances could not be used in a set or as a
+        # dict key. Hashing by raw pointer is an approximation (two refs
+        # that are == via IsSameObject but hold different pointers will
+        # hash differently) but is far better than being unhashable.
+        return hash(self._ptr)
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} ptr=0x{self._ptr or 0:x}>"
