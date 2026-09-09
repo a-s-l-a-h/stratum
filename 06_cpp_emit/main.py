@@ -322,7 +322,13 @@ jclass       find_class(JNIEnv* env, const char* name); // FindClass, falls
 void         store_callback(const std::string& key, nb::callable fn);
 nb::callable get_callback(const std::string& key);
 void         remove_callback(const std::string& key);
+size_t       remove_callbacks_by_prefix(const std::string& prefix);
 size_t       stratum_callback_count();
+
+// Object inspection & downcast verification
+bool         is_instance_of(int64_t ptr, uint32_t class_id);
+std::string  object_to_string(int64_t ptr);
+int32_t      object_hash_code(int64_t ptr);
 
 // Checks for a pending Java exception. If present: clears it, extracts the
 // message, and throws std::runtime_error (which nanobind turns into a
@@ -331,6 +337,10 @@ void         stratum_check_java_exc(JNIEnv* env);
 
 jstring      stratum_str_to_jstring(JNIEnv* env, const std::string& utf8);
 std::string  stratum_jstring_to_str(JNIEnv* env, jobject jstr_obj);
+
+// v9.1: List/Collection -> Python list, Map -> Python dict (return-value path)
+nb::list     stratum_collection_to_list(JNIEnv* env, jobject collection);
+nb::dict     stratum_map_to_dict(JNIEnv* env, jobject map);
 
 // ── v9 FIX 1: RAII local-reference frame ────────────────────────────────
 // Wrap ANY block of JNI code that can create local references (object
@@ -461,6 +471,21 @@ void remove_callback(const std::string& key) {
     g_callbacks.erase(key);
 }
 
+size_t remove_callbacks_by_prefix(const std::string& prefix) {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    size_t removed = 0;
+    for (auto it = g_callbacks.begin(); it != g_callbacks.end(); ) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            it = g_callbacks.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    LOGD("remove_callbacks_by_prefix '%s' removed %zu", prefix.c_str(), removed);
+    return removed;
+}
+
 void stratum_check_java_exc(JNIEnv* env) {
     if (!env || !env->ExceptionCheck()) return;
     jthrowable ex = env->ExceptionOccurred();
@@ -528,6 +553,107 @@ std::string stratum_jstring_to_str(JNIEnv* env, jobject jstr_obj) {
     if (sjc) env->ReleaseStringChars(jstr, sjc);
     env->DeleteLocalRef((jobject)jstr);
     return res;
+}
+
+nb::list stratum_collection_to_list(JNIEnv* env, jobject collection) {
+    nb::list result;
+    if (!env || !collection) return result;
+    JniLocalFrame frame(env, 16);
+    jclass cls = env->GetObjectClass(collection);
+    jmethodID msize = env->GetMethodID(cls, "size", "()I");
+    jmethodID mget  = env->GetMethodID(cls, "get",  "(I)Ljava/lang/Object;");
+    if (msize && mget) {
+        jint len = env->CallIntMethod(collection, msize);
+        for (jint i = 0; i < len; ++i) {
+            jobject item = env->CallObjectMethod(collection, mget, i);
+            if (!item) { result.append(nb::none()); continue; }
+            if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
+                result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
+            } else {
+                jobject gref = env->NewGlobalRef(item);
+                env->DeleteLocalRef(item);
+                result.append(nb::cast((int64_t)(uintptr_t)gref));
+            }
+        }
+    } else {
+        env->ExceptionClear();
+        jmethodID miter = env->GetMethodID(cls, "iterator", "()Ljava/util/Iterator;");
+        if (miter) {
+            jobject iter = env->CallObjectMethod(collection, miter);
+            if (iter) {
+                jclass ic = env->GetObjectClass(iter);
+                jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+                jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
+                env->DeleteLocalRef(ic);
+                while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                    jobject item = env->CallObjectMethod(iter, mnx);
+                    if (!item) { result.append(nb::none()); continue; }
+                    if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
+                        result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
+                    } else {
+                        jobject gref = env->NewGlobalRef(item);
+                        env->DeleteLocalRef(item);
+                        result.append(nb::cast((int64_t)(uintptr_t)gref));
+                    }
+                }
+                env->DeleteLocalRef(iter);
+            }
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    env->DeleteLocalRef(cls);
+    return result;
+}
+
+nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
+    nb::dict result;
+    if (!env || !map) return result;
+    JniLocalFrame frame(env, 16);
+    jclass mcls = env->GetObjectClass(map);
+    jmethodID mes = env->GetMethodID(mcls, "entrySet", "()Ljava/util/Set;");
+    env->DeleteLocalRef(mcls);
+    if (!mes) { env->ExceptionClear(); return result; }
+    jobject es = env->CallObjectMethod(map, mes);
+    if (!es) return result;
+    jclass escls = env->GetObjectClass(es);
+    jmethodID esit = env->GetMethodID(escls, "iterator", "()Ljava/util/Iterator;");
+    env->DeleteLocalRef(escls);
+    jobject iter = env->CallObjectMethod(es, esit);
+    env->DeleteLocalRef(es);
+    if (!iter) return result;
+    jclass ic = env->GetObjectClass(iter);
+    jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+    jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
+    env->DeleteLocalRef(ic);
+    while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+        jobject entry = env->CallObjectMethod(iter, mnx);
+        jclass ec = env->GetObjectClass(entry);
+        jmethodID mkey = env->GetMethodID(ec, "getKey", "()Ljava/lang/Object;");
+        jmethodID mval = env->GetMethodID(ec, "getValue", "()Ljava/lang/Object;");
+        env->DeleteLocalRef(ec);
+        jobject ek = env->CallObjectMethod(entry, mkey);
+        jobject ev = env->CallObjectMethod(entry, mval);
+        env->DeleteLocalRef(entry);
+        nb::object pyk, pyv;
+        if (ek && g_jstring_class && env->IsInstanceOf(ek, g_jstring_class)) {
+            pyk = nb::str(stratum_jstring_to_str(env, ek).c_str());
+        } else if (ek) {
+            jobject gref = env->NewGlobalRef(ek);
+            env->DeleteLocalRef(ek);
+            pyk = nb::cast((int64_t)(uintptr_t)gref);
+        } else pyk = nb::none();
+        if (ev && g_jstring_class && env->IsInstanceOf(ev, g_jstring_class)) {
+            pyv = nb::str(stratum_jstring_to_str(env, ev).c_str());
+        } else if (ev) {
+            jobject gref = env->NewGlobalRef(ev);
+            env->DeleteLocalRef(ev);
+            pyv = nb::cast((int64_t)(uintptr_t)gref);
+        } else pyv = nb::none();
+        result[pyk] = pyv;
+    }
+    env->DeleteLocalRef(iter);
+    return result;
 }
 
 // Called by a Stage 05.5 Java adapter / dynamic proxy when Android
@@ -751,17 +877,44 @@ static void resolve_class_slots(JNIEnv* env, uint32_t class_id) {
 // the method's param_tags string (see 05_resolve/main.py
 // compute_param_tags() — every tag emitted there has a case here).
 static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMeta& mm,
-                                   nb::args& args, jvalue* jargs, std::vector<jobject>& locals) {
+                                   nb::args& args, jvalue* jargs, std::vector<jobject>& locals,
+                                   int64_t caller_ptr = 0) {
     size_t n = nb::len(args);
 
-    // v9 FIX 4a: hard ceiling — never index past jargs[32], throw instead
-    // of corrupting the stack.
+    // Automatic Java varargs packing for Object... / String... (tag 'A' or 'T')
+    nb::list auto_packed_args;
+    bool is_varargs = false;
+    if (mm.param_count > 0) {
+        char last_tag = tags[mm.param_count - 1];
+        if (last_tag == 'A' || last_tag == 'T') {
+            if (n != (size_t)mm.param_count ||
+                (n > 0 && !nb::isinstance<nb::list>(args[n - 1]) && !args[n - 1].is_none())) {
+                is_varargs = true;
+            }
+        }
+    }
+
+    if (is_varargs) {
+        size_t fixed_count = (size_t)mm.param_count - 1;
+        if (n < fixed_count) {
+            throw std::runtime_error(
+                std::string("Stratum: argument count mismatch: method expects at least ") +
+                std::to_string((int)fixed_count) + " but got " + std::to_string((int)n));
+        }
+        nb::list vararg_list;
+        for (size_t vi = fixed_count; vi < n; ++vi) {
+            vararg_list.append(args[vi]);
+        }
+        for (size_t fi = 0; fi < fixed_count; ++fi) {
+            auto_packed_args.append(args[fi]);
+        }
+        auto_packed_args.append(vararg_list);
+        n = (size_t)mm.param_count;
+    }
+
     if (n > 32) {
         throw std::runtime_error("Stratum: a single call cannot take more than 32 arguments");
     }
-    // v9 FIX 4b: catch a corrupted/mismatched call (e.g. calling the
-    // wrong overload's slot) before it can touch memory with the wrong
-    // tag interpretation.
     if (n != (size_t)mm.param_count) {
         throw std::runtime_error(
             std::string("Stratum: argument count mismatch: method expects ") +
@@ -770,13 +923,27 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
 
     for (size_t i = 0; i < n; ++i) {
         char tag = tags[i];
-        nb::handle item = args[i];
+        nb::handle item = is_varargs ? nb::handle(auto_packed_args[i]) : args[i];
         switch (tag) {
             // ── Plain primitives ─────────────────────────────────────
             case 'Z': jargs[i].z = nb::cast<bool>(item) ? JNI_TRUE : JNI_FALSE; break;
             case 'B': jargs[i].b = (jbyte)nb::cast<int>(item); break;
-            case 'C': { std::string s = nb::cast<std::string>(item);
-                        jargs[i].c = s.empty() ? 0 : (jchar)(uint16_t)(unsigned char)s[0]; break; }
+            case 'C': {
+                std::string s = nb::cast<std::string>(item);
+                if (s.empty()) {
+                    jargs[i].c = 0;
+                } else {
+                    const uint8_t* u = reinterpret_cast<const uint8_t*>(s.data());
+                    uint32_t cp = u[0];
+                    if ((u[0] & 0xE0) == 0xC0 && s.size() >= 2) {
+                        cp = ((u[0] & 0x1F) << 6) | (u[1] & 0x3F);
+                    } else if ((u[0] & 0xF0) == 0xE0 && s.size() >= 3) {
+                        cp = ((u[0] & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+                    }
+                    jargs[i].c = (jchar)(cp <= 0xFFFF ? cp : 0xFFFD);
+                }
+                break;
+            }
             case 'S': jargs[i].s = (jshort)nb::cast<int>(item); break;
             case 'I': jargs[i].i = (jint)nb::cast<int32_t>(item); break;
             case 'J': jargs[i].j = (jlong)nb::cast<int64_t>(item); break;
@@ -1029,7 +1196,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     break;
                 }
                 static std::atomic<uint64_t> s_aid{0};
-                std::string key = "adapter_" + std::to_string(++s_aid);
+                std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_a_") : "adapter_") + std::to_string(++s_aid);
                 if (nb::isinstance<nb::callable>(item)) {
                     store_callback(key, nb::cast<nb::callable>(item));
                 } else if (nb::isinstance<nb::dict>(item)) {
@@ -1059,7 +1226,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     break;
                 }
                 static std::atomic<uint64_t> s_pid{0};
-                std::string key = "proxy_" + std::to_string(++s_pid);
+                std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_p_") : "proxy_") + std::to_string(++s_pid);
                 if (nb::isinstance<nb::callable>(item)) store_callback(key, nb::cast<nb::callable>(item));
                 const char* iface_name = get_str(mm.adapter_jni_offset);
                 jclass iface_cls = find_class(env, iface_name);
@@ -1119,7 +1286,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
     }                                                                               \
     jvalue jargs[32] = {};  /* v9 FIX 4: zero-init, always bounded to 32 */          \
     std::vector<jobject> locals;                                                    \
-    pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals);
+    pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals, ptr);
 
 #define CLEANUP_AND_CHECK() stratum_check_java_exc(env);
 
@@ -1261,26 +1428,177 @@ nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args
     CLEANUP_AND_CHECK()
     if (!res) return nb::list();
 
-    jclass objArrCls = env->FindClass("[Ljava/lang/Object;");
-    nb::list py_list;
-    if (env->IsInstanceOf(res, objArrCls)) {
-        jsize len = env->GetArrayLength((jarray)res);
+    static jclass s_byte_arr_cls = nullptr, s_int_arr_cls = nullptr,
+                  s_long_arr_cls = nullptr, s_flt_arr_cls = nullptr,
+                  s_dbl_arr_cls  = nullptr, s_bool_arr_cls = nullptr,
+                  s_char_arr_cls = nullptr, s_short_arr_cls = nullptr;
+    if (!s_byte_arr_cls) {
+        auto get_arr_cls = [&](const char* sig) {
+            jclass c = env->FindClass(sig);
+            jclass g = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            return g;
+        };
+        s_byte_arr_cls  = get_arr_cls("[B");
+        s_int_arr_cls   = get_arr_cls("[I");
+        s_long_arr_cls  = get_arr_cls("[J");
+        s_flt_arr_cls   = get_arr_cls("[F");
+        s_dbl_arr_cls   = get_arr_cls("[D");
+        s_bool_arr_cls  = get_arr_cls("[Z");
+        s_char_arr_cls  = get_arr_cls("[C");
+        s_short_arr_cls = get_arr_cls("[S");
+    }
+
+    // 1. byte[] -> return bytes
+    if (env->IsInstanceOf(res, s_byte_arr_cls)) {
+        jbyteArray ba = (jbyteArray)res;
+        jsize len = env->GetArrayLength(ba);
+        jbyte* buf = env->GetByteArrayElements(ba, nullptr);
+        nb::bytes out(reinterpret_cast<const char*>(buf), (size_t)len);
+        env->ReleaseByteArrayElements(ba, buf, JNI_ABORT);
+        env->DeleteLocalRef(res);
+        return out;
+    }
+
+    // 2. int[] -> return list[int]
+    if (env->IsInstanceOf(res, s_int_arr_cls)) {
+        jintArray ia = (jintArray)res;
+        jsize len = env->GetArrayLength(ia);
+        std::vector<jint> buf(len);
+        if (len > 0) env->GetIntArrayRegion(ia, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+
+    // 3. float[] -> return list[float]
+    if (env->IsInstanceOf(res, s_flt_arr_cls)) {
+        jfloatArray fa = (jfloatArray)res;
+        jsize len = env->GetArrayLength(fa);
+        std::vector<jfloat> buf(len);
+        if (len > 0) env->GetFloatArrayRegion(fa, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::float_((double)buf[i]));
+        return out;
+    }
+
+    // 4. long[] -> return list[int]
+    if (env->IsInstanceOf(res, s_long_arr_cls)) {
+        jlongArray ja = (jlongArray)res;
+        jsize len = env->GetArrayLength(ja);
+        std::vector<jlong> buf(len);
+        if (len > 0) env->GetLongArrayRegion(ja, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+
+    // 5. double[] -> return list[float]
+    if (env->IsInstanceOf(res, s_dbl_arr_cls)) {
+        jdoubleArray da = (jdoubleArray)res;
+        jsize len = env->GetArrayLength(da);
+        std::vector<jdouble> buf(len);
+        if (len > 0) env->GetDoubleArrayRegion(da, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::float_(buf[i]));
+        return out;
+    }
+
+    // 6. boolean[] -> return list[bool]
+    if (env->IsInstanceOf(res, s_bool_arr_cls)) {
+        jbooleanArray za = (jbooleanArray)res;
+        jsize len = env->GetArrayLength(za);
+        std::vector<jboolean> buf(len);
+        if (len > 0) env->GetBooleanArrayRegion(za, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::bool_(buf[i] != JNI_FALSE));
+        return out;
+    }
+
+    // 7. char[] -> return str
+    if (env->IsInstanceOf(res, s_char_arr_cls)) {
+        jcharArray ca = (jcharArray)res;
+        jsize len = env->GetArrayLength(ca);
+        std::vector<jchar> buf(len);
+        if (len > 0) env->GetCharArrayRegion(ca, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        std::string utf8;
         for (jsize i = 0; i < len; ++i) {
-            jobject elem = env->GetObjectArrayElement((jobjectArray)res, i);
-            if (!elem) {
-                py_list.append(nb::none());
-            } else if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class)) {
-                py_list.append(nb::str(stratum_jstring_to_str(env, elem).c_str()));
-            } else {
-                jobject gref = env->NewGlobalRef(elem);
-                env->DeleteLocalRef(elem);
-                py_list.append(nb::cast((int64_t)(uintptr_t)gref));
-            }
+            uint16_t c = (uint16_t)buf[i];
+            if (c < 0x80) { utf8 += (char)c; }
+            else if (c < 0x800) { utf8 += (char)(0xC0 | (c >> 6)); utf8 += (char)(0x80 | (c & 0x3F)); }
+            else { utf8 += (char)(0xE0 | (c >> 12)); utf8 += (char)(0x80 | ((c >> 6) & 0x3F)); utf8 += (char)(0x80 | (c & 0x3F)); }
+        }
+        return nb::str(utf8.c_str());
+    }
+
+    // 8. short[] -> return list[int]
+    if (env->IsInstanceOf(res, s_short_arr_cls)) {
+        jshortArray sa = (jshortArray)res;
+        jsize len = env->GetArrayLength(sa);
+        std::vector<jshort> buf(len);
+        if (len > 0) env->GetShortArrayRegion(sa, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+
+    // 9. Object[] and String[]
+    nb::list py_list;
+    jsize len = env->GetArrayLength((jarray)res);
+    for (jsize i = 0; i < len; ++i) {
+        jobject elem = env->GetObjectArrayElement((jobjectArray)res, i);
+        if (!elem) {
+            py_list.append(nb::none());
+        } else if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class)) {
+            py_list.append(nb::str(stratum_jstring_to_str(env, elem).c_str()));
+        } else {
+            jobject gref = env->NewGlobalRef(elem);
+            env->DeleteLocalRef(elem);
+            py_list.append(nb::cast((int64_t)(uintptr_t)gref));
         }
     }
-    env->DeleteLocalRef(objArrCls);
     env->DeleteLocalRef(res);
     return py_list;
+}
+nb::object call_list(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
+    RESOLVE_AND_LOOKUP()
+    jobject res;
+    if (cls.methods[slot].is_static) {
+        nb::gil_scoped_release r;
+        res = env->CallStaticObjectMethodA(cls.class_ref, mid, jargs);
+    } else {
+        nb::gil_scoped_release r;
+        res = env->CallObjectMethodA((jobject)(uintptr_t)ptr, mid, jargs);
+    }
+    CLEANUP_AND_CHECK()
+    if (!res) return nb::list();
+    nb::list result = stratum_collection_to_list(env, res);
+    env->DeleteLocalRef(res);
+    return result;
+}
+
+nb::object call_map(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
+    RESOLVE_AND_LOOKUP()
+    jobject res;
+    if (cls.methods[slot].is_static) {
+        nb::gil_scoped_release r;
+        res = env->CallStaticObjectMethodA(cls.class_ref, mid, jargs);
+    } else {
+        nb::gil_scoped_release r;
+        res = env->CallObjectMethodA((jobject)(uintptr_t)ptr, mid, jargs);
+    }
+    CLEANUP_AND_CHECK()
+    if (!res) return nb::dict();
+    nb::dict result = stratum_map_to_dict(env, res);
+    env->DeleteLocalRef(res);
+    return result;
 }
 
 int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
@@ -1311,10 +1629,8 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
 
 void delete_ref(int64_t ptr) {
     if (!ptr) return;
-    // CRITICAL: get_env() (attaches thread if needed), NOT get_env_safe().
-    // Python's GC can call __del__ on threads never attached to the JVM
-    // — get_env_safe() would return nullptr there and this global
-    // reference would leak forever. See bridge_core.h docs.
+    // Automatically clear any callbacks associated with this object prefix
+    remove_callbacks_by_prefix("obj_" + std::to_string(ptr) + "_");
     JNIEnv* env = get_env();
     if (env) {
         env->DeleteGlobalRef((jobject)(uintptr_t)ptr);
@@ -1584,6 +1900,80 @@ nb::object bytebuffer_to_memoryview(int64_t ptr) {
     env->ReleaseByteArrayElements(ba, bp, JNI_ABORT);
     return result;
 }
+
+int64_t allocate_direct_buffer(int32_t capacity) {
+    JNIEnv* env = get_env();
+    if (!env || capacity <= 0) return 0;
+    JniLocalFrame frame(env, 8);
+    jclass bb_cls = env->FindClass("java/nio/ByteBuffer");
+    if (!bb_cls) { env->ExceptionClear(); return 0; }
+    jmethodID mid = env->GetStaticMethodID(bb_cls, "allocateDirect", "(I)Ljava/nio/ByteBuffer;");
+    if (!mid) { env->ExceptionClear(); env->DeleteLocalRef(bb_cls); return 0; }
+    jobject bb = env->CallStaticObjectMethod(bb_cls, mid, (jint)capacity);
+    env->DeleteLocalRef(bb_cls);
+    if (!bb) return 0;
+    jobject gref = env->NewGlobalRef(bb);
+    return (int64_t)(uintptr_t)gref;
+}
+
+#include <android/native_window.h>
+#include <android/native_window_jni.h>
+
+int64_t surface_to_native_window(int64_t surface_ptr) {
+    if (!surface_ptr) return 0;
+    JNIEnv* env = get_env();
+    if (!env) return 0;
+    ANativeWindow* win = ANativeWindow_fromSurface(env, (jobject)(uintptr_t)surface_ptr);
+    return (int64_t)(uintptr_t)win;
+}
+
+void release_native_window(int64_t win_ptr) {
+    if (win_ptr) {
+        ANativeWindow_release((ANativeWindow*)(uintptr_t)win_ptr);
+    }
+}
+
+bool is_instance_of(int64_t ptr, uint32_t class_id) {
+    if (!ptr || class_id >= g_class_count) return false;
+    JNIEnv* env = get_env();
+    if (!env) return false;
+    ensure_class_resolved(env, class_id);
+    jclass c = g_classes[class_id].class_ref;
+    if (!c) return false;
+    return env->IsInstanceOf((jobject)(uintptr_t)ptr, c) != JNI_FALSE;
+}
+
+std::string object_to_string(int64_t ptr) {
+    if (!ptr) return "null";
+    JNIEnv* env = get_env();
+    if (!env) return "";
+    JniLocalFrame frame(env, 8);
+    jobject obj = (jobject)(uintptr_t)ptr;
+    jclass cls = env->GetObjectClass(obj);
+    if (!cls) { env->ExceptionClear(); return ""; }
+    jmethodID mid = env->GetMethodID(cls, "toString", "()Ljava/lang/String;");
+    env->DeleteLocalRef(cls);
+    if (!mid) { env->ExceptionClear(); return ""; }
+    jstring js = (jstring)env->CallObjectMethod(obj, mid);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    return stratum_jstring_to_str(env, js);
+}
+
+int32_t object_hash_code(int64_t ptr) {
+    if (!ptr) return 0;
+    JNIEnv* env = get_env();
+    if (!env) return 0;
+    JniLocalFrame frame(env, 8);
+    jobject obj = (jobject)(uintptr_t)ptr;
+    jclass cls = env->GetObjectClass(obj);
+    if (!cls) { env->ExceptionClear(); return 0; }
+    jmethodID mid = env->GetMethodID(cls, "hashCode", "()I");
+    env->DeleteLocalRef(cls);
+    if (!mid) { env->ExceptionClear(); return 0; }
+    jint h = env->CallIntMethod(obj, mid);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
+    return (int32_t)h;
+}
 """
 
 # =============================================================================
@@ -1606,6 +1996,8 @@ double call_d(int64_t, uint32_t, uint32_t, nb::args);
 std::string call_str(int64_t, uint32_t, uint32_t, nb::args);
 int64_t call_o(int64_t, uint32_t, uint32_t, nb::args);
 nb::object call_arr(int64_t, uint32_t, uint32_t, nb::args);
+nb::object call_list(int64_t, uint32_t, uint32_t, nb::args);
+nb::object call_map(int64_t, uint32_t, uint32_t, nb::args);
 int64_t new_instance(uint32_t, uint32_t, nb::args);
 void delete_ref(int64_t);
 int64_t field_get_i(int64_t, uint32_t, uint32_t);
@@ -1622,6 +2014,12 @@ void field_set_str(int64_t, uint32_t, uint32_t, const std::string&);
 void field_set_o(int64_t, uint32_t, uint32_t, int64_t);
 bool is_same_object(int64_t, int64_t);
 nb::object bytebuffer_to_memoryview(int64_t);
+int64_t allocate_direct_buffer(int32_t);
+int64_t surface_to_native_window(int64_t);
+void release_native_window(int64_t);
+bool is_instance_of(int64_t, uint32_t);
+std::string object_to_string(int64_t);
+int32_t object_hash_code(int64_t);
 
 static std::unordered_map<std::string, nb::callable> g_lifecycle_cbs;
 static std::mutex g_lifecycle_mutex;
@@ -1682,6 +2080,8 @@ NB_MODULE(_stratum, m) {
     m.def("call_str", &call_str);
     m.def("call_o", &call_o);
     m.def("call_arr", &call_arr);
+    m.def("call_list", &call_list);
+    m.def("call_map", &call_map);
     m.def("new_instance", &new_instance);
     m.def("delete_ref", &delete_ref);
 
@@ -1698,10 +2098,17 @@ NB_MODULE(_stratum, m) {
     m.def("field_set_str", &field_set_str);
     m.def("field_set_o", &field_set_o);
     m.def("is_same_object", &is_same_object);
+    m.def("is_instance_of", &is_instance_of);
+    m.def("to_string", &object_to_string);
+    m.def("hash_code", &object_hash_code);
     m.def("remove_callback", [](const std::string& key) { remove_callback(key); });
+    m.def("remove_callbacks_by_prefix", [](const std::string& prefix) { return remove_callbacks_by_prefix(prefix); });
     m.def("stratum_callback_count", []() -> size_t { return stratum_callback_count(); });
 
     m.def("bytebuffer_to_memoryview", &bytebuffer_to_memoryview);
+    m.def("allocate_direct_buffer", &allocate_direct_buffer);
+    m.def("surface_to_native_window", &surface_to_native_window);
+    m.def("release_native_window", &release_native_window);
 
     m.def("get_activity_ptr", []() -> int64_t {
         std::lock_guard<std::mutex> lk(g_activity_mutex);

@@ -80,6 +80,19 @@ RET_TYPE_MAP = {
     "jstring": 9, "jobject": 10,
 }
 
+# v9.1: return types that get auto-converted to native Python list/dict
+# instead of being wrapped as a generic Java object.
+COLLECTION_RETURN_TYPES = {
+    "java.util.List", "java.util.ArrayList", "java.util.LinkedList",
+    "java.util.Collection", "java.util.Set", "java.util.HashSet",
+    "java.util.LinkedHashSet", "java.util.TreeSet", "java.util.Queue",
+    "java.util.Deque", "java.util.ArrayDeque",
+}
+MAP_RETURN_TYPES = {
+    "java.util.Map", "java.util.HashMap", "java.util.LinkedHashMap",
+    "java.util.TreeMap", "java.util.Hashtable", "java.util.SortedMap",
+}
+
 
 def print_header(title: str) -> None:
     print("=" * 70)
@@ -236,8 +249,13 @@ def index_and_save(selected_fqns: list, registry: dict, output_dir: Path, closur
         for slot, m in enumerate(ordered):
             m["slot"] = slot
             m["param_tags"] = compute_param_tags(m.get("params", []))
+            ret_fqn = m.get("return_java_type", "")
             if m.get("return_is_array", False):
                 m["ret_type_id"] = 11
+            elif ret_fqn in MAP_RETURN_TYPES:
+                m["ret_type_id"] = 13
+            elif ret_fqn in COLLECTION_RETURN_TYPES:
+                m["ret_type_id"] = 12
             else:
                 m["ret_type_id"] = RET_TYPE_MAP.get(m.get("return_jni", "void"), 10)
             m["safe_name"] = sanitize_id(m.get("name", "unknown"))

@@ -54,6 +54,17 @@ def getActivity():
 
 
 get_activity = getActivity
+stratum_get_activity = getActivity
+
+
+def stratum_cast(obj, target_cls):
+    """Safely cast an object or pointer to target_cls with JNI IsInstanceOf verification."""
+    if obj is None:
+        return None
+    return target_cls.from_ptr(obj)
+
+
+stratum_cast_to = stratum_cast
 
 
 def setContentView(activity, view) -> None:
@@ -65,11 +76,36 @@ def setContentView(activity, view) -> None:
 
 set_content_view = setContentView
 
+
+def allocate_direct_buffer(capacity: int):
+    """Allocate an off-heap direct java.nio.ByteBuffer."""
+    ptr = _core.allocate_direct_buffer(capacity)
+    if not ptr:
+        return None
+    from stratum.core.stratum_object import _wrap_instance
+    return _wrap_instance(ptr, "java.nio.ByteBuffer")
+
+
+def surface_to_native_window(surface) -> int:
+    """Acquire an ANativeWindow* pointer (as an integer) from an android.view.Surface."""
+    s_ptr = getattr(surface, "_ptr", surface)
+    return _core.surface_to_native_window(s_ptr)
+
+
+def release_native_window(win_ptr: int) -> None:
+    """Release an ANativeWindow* handle previously acquired."""
+    _core.release_native_window(win_ptr)
+
 def remove_callback(key: str) -> None:
     """Release a stored Python callback (listener/adapter) by its key,
     if you tracked it. Reduces the g_callbacks map growth flagged by the
     logcat warning that fires once it exceeds ~10,000 live entries."""
     _core.remove_callback(key)
+
+
+def remove_callbacks_by_prefix(prefix: str) -> int:
+    """Remove all stored callbacks matching a given prefix."""
+    return _core.remove_callbacks_by_prefix(prefix)
 
 
 def callback_count() -> int:

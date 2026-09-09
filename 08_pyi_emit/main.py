@@ -93,6 +93,7 @@ CALL_DISPATCH = {
     0: "call_v", 1: "call_z", 2: "call_i", 3: "call_i", 4: "call_i",
     5: "call_i", 6: "call_j", 7: "call_d", 8: "call_d",
     9: "call_str", 10: "call_o", 11: "call_arr",
+    12: "call_list", 13: "call_map",
 }
 FIELD_GET_DISPATCH = {
     1: "field_get_z", 2: "field_get_i", 3: "field_get_i",
@@ -227,7 +228,7 @@ def build_method_dispatcher(group: list, class_id: int) -> list:
         ret_id = m.get("ret_type_id", 10)
         fn = CALL_DISPATCH.get(ret_id, "call_o")
         target = "0" if is_static else "self._ptr"
-        if ret_id == 11:
+        if ret_id in (11, 12, 13):
             return f"{indent}return _core.{fn}({target}, {class_id}, {slot}, *args)"
         if ret_id == 10 and m.get("return_fqn"):
             return (f"{indent}_ptr = _core.{fn}({target}, {class_id}, {slot}, *args)\n"
@@ -407,6 +408,10 @@ def emit_pyi_stub(data: dict) -> str:
         "",
         f"class {simple}(StratumObject):",
         "    def __init__(self, *args: Any, _ptr: Optional[int] = None) -> None: ...",
+        f"    @classmethod",
+        f"    def from_ptr(cls, obj_or_ptr: Any) -> {simple}: ...",
+        f"    @classmethod",
+        f"    def _stratum_cast(cls, obj_or_ptr: Any) -> {simple}: ...",
     ]
     grouped = defaultdict(list)
     for m in data.get("methods", []):
@@ -565,8 +570,10 @@ def _wrap_instance(ptr: int, fqn: str):
 class StratumObject:
     """Base class for all Stratum Java object wrappers. Owns a JNI
     global reference and releases it automatically when garbage
-    collected (see delete_ref() in stratum_engine.cpp for why the C++
-    side specifically attaches the calling thread before freeing it)."""
+    collected."""
+
+    _CLASS_ID = None
+    _FQN = "java.lang.Object"
 
     def __init__(self, _ptr: int = None) -> None:
         self._ptr = _ptr
@@ -574,6 +581,8 @@ class StratumObject:
     def __del__(self) -> None:
         ptr = getattr(self, "_ptr", None)
         if ptr:
+            # Delete callbacks attached to this object instance prefix and free ref
+            _core.remove_callbacks_by_prefix(f"obj_{ptr}_")
             _core.delete_ref(ptr)
             self._ptr = None
 
@@ -584,26 +593,55 @@ class StratumObject:
         return bool(self._ptr)
 
     def __eq__(self, other) -> bool:
+        if other is None:
+            return not self._ptr
         if not isinstance(other, StratumObject):
             return NotImplemented
         if not self._ptr or not other._ptr:
             return self._ptr == other._ptr
-        # Two different global refs (e.g. one from a method return, one
-        # from a field getter) can point at the same underlying Java
-        # object with different pointer values — compare via JNI identity.
         return bool(_core.is_same_object(self._ptr, other._ptr))
 
+    def __ne__(self, other) -> bool:
+        eq = self.__eq__(other)
+        if eq is NotImplemented:
+            return NotImplemented
+        return not eq
+
     def __hash__(self) -> int:
-        # NOTE: defining __eq__ without __hash__ makes a class unhashable
-        # in Python 3 — this was previously missing entirely, so
-        # StratumObject instances could not be used in a set or as a
-        # dict key. Hashing by raw pointer is an approximation (two refs
-        # that are == via IsSameObject but hold different pointers will
-        # hash differently) but is far better than being unhashable.
-        return hash(self._ptr)
+        if not self._ptr:
+            return 0
+        return int(_core.hash_code(self._ptr))
+
+    def __str__(self) -> str:
+        if not self._ptr:
+            return "null"
+        return _core.to_string(self._ptr)
 
     def __repr__(self) -> str:
-        return f"<{type(self).__name__} ptr=0x{self._ptr or 0:x}>"
+        if not self._ptr:
+            return f"<{type(self).__name__} null>"
+        s = _core.to_string(self._ptr)
+        return f"<{type(self).__name__} ptr=0x{self._ptr:x} str='{s}'>"
+
+    @classmethod
+    def from_ptr(cls, obj_or_ptr):
+        """Safely cast a pointer or existing StratumObject to this class type,
+        verifying type compatibility via JNI IsInstanceOf."""
+        if obj_or_ptr is None:
+            return None
+        ptr = obj_or_ptr._ptr if isinstance(obj_or_ptr, StratumObject) else int(obj_or_ptr)
+        if not ptr:
+            return None
+        if cls._CLASS_ID is not None:
+            if not _core.is_instance_of(ptr, cls._CLASS_ID):
+                target_name = getattr(cls, "_FQN", cls.__name__)
+                raise TypeError(f"Object at 0x{ptr:x} is not an instance of {target_name}")
+        return cls(_ptr=ptr)
+
+    @classmethod
+    def _stratum_cast(cls, obj_or_ptr):
+        """Backward-compatible alias for from_ptr."""
+        return cls.from_ptr(obj_or_ptr)
 '''
 
 
