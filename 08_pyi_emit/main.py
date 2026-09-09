@@ -1,435 +1,623 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Stratum Pipeline — Stage 08 : Emit Python .pyi type stubs
-==========================================================
-  05_resolve/output/      <- Stage 05 enriched JSON (one file per class)
-        |
-        v
-  08_pyi_emit/main.py   <- THIS FILE
-        |
-        v
-  08_pyi_emit/output/   <- .pyi stub files, one per class + __init__.pyi per package
+Stratum Pipeline — Stage 08: Python Wrapper & Stub Emitter
+=============================================================
+LOCATION: 08_pyi_emit/main.py
+VERSION: v9 (merges v8 + v8fix + Patch C/D: non-silent parent-class
+              fallback, deterministic caching, extended overload
+              type-check table matching the new v9 tag set)
+
+WHAT THIS STAGE EMITS (into 08_pyi_emit/output/)
+    stratum/core/stratum_object.py
+        Base class for every generated wrapper. Owns the JNI global-ref
+        pointer (`_ptr`), releases it in __del__, and provides two lazy
+        resolution helpers used by every generated class:
+          _get_parent_class(fqn) -> resolves a parent Python class at
+                                     IMPORT time of the subclass.
+          _wrap_instance(ptr,fqn)-> resolves a RETURN-value wrapper class
+                                     at CALL time.
+        Both fall back to the generic StratumObject if the target class
+        wasn't emitted into this build (excluded by targets.json) — this
+        is what prevents "class needs a class that isn't in this build"
+        from ever crashing anything. v9 change: this fallback is no
+        longer SILENT — see "v9 FIX (parent-class resolution)" below.
+    stratum/android/**/<ClassName>.py
+        One executable Python class per Java class. Every method body is
+        a short call into stratum._stratum.call_*(ptr, class_id, slot,
+        *args). Both the ORIGINAL Java method name (camelCase, e.g.
+        setText) and a snake_case alias (set_text) are defined.
+    stratum/android/**/<ClassName>.pyi
+        Type stubs for IDE autocomplete, kept in sync with the .py file.
+
+WHY INNER CLASSES ($) ARE NORMALIZED CONSISTENTLY EVERYWHERE
+    Java: android.view.View$OnClickListener
+    On disk: stratum/android/view/View_OnClickListener.py
+    In imports: stratum.android.view.View_OnClickListener
+    _normalize_fqn() in stratum_object.py performs this EXACT same
+    "$" -> "_" substitution before building the dotted import path.
+    sanitize_id() below must keep producing the identical output, or
+    inner-class imports fail with ModuleNotFoundError.
+
+v9 FIX (parent-class / return-type resolution — audit issue #3):
+    v8's _get_parent_class() / _wrap_instance() caught EVERY exception
+    (including real bugs, not just "class excluded from this build")
+    and silently substituted StratumObject with no trace. That hides
+    genuine problems (a syntax error in a generated file, a broken
+    circular import) behind a class that LOOKS like it worked but whose
+    isinstance() checks silently return wrong answers everywhere else in
+    the app.
+    v9 changes this to:
+      1. Distinguish "module genuinely not present in this build"
+         (ModuleNotFoundError — expected, silent, this is the normal
+         "class was excluded by targets.json" case) from "module IS
+         present but failed to import/resolve for some other reason"
+         (any other exception — now printed as a visible warning to
+         stderr, with an optional --stratum-debug traceback).
+      2. Cache BOTH successes and failures, so the resolution outcome
+         for a given FQN is deterministic for the lifetime of the
+         process — it can't silently flip between StratumObject and the
+         real class depending on import order/timing.
+    This does not change behaviour for a correctly-built wheel (nothing
+    should ever hit branch 2); it only makes a real problem visible
+    instead of hiding it as an apparently-working-but-wrong class.
+
+OVERLOAD DISPATCH
+    Java allows multiple methods with the same name and different
+    parameter lists; Python doesn't. Overloads sharing a name are
+    dispatched at runtime by argument COUNT first, then by a cheap
+    isinstance() check on the first differing argument if two overloads
+    happen to share the same argument count. v9 extends the type-check
+    table to cover every tag added in 05_resolve/main.py's v9
+    compute_param_tags() (arrays, List/Collection) — v8's table only
+    covered primitives/strings and would fall through to `True` (i.e.
+    "always matches", picking whichever overload happened to sort
+    first) for any array/list-typed first parameter.
+
+FIELD ACCESS (sf_get_*/f_get_*/sf_set_*)
+    Mirrors the field_get_*/field_set_* functions in stratum_engine.cpp.
+    Static constants use `sf_`, instance fields use `f_`, matching the
+    original per-class codegen pipeline's naming convention.
 """
 
 import argparse
 import json
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
+# Must stay in sync with RET_TYPE_MAP in 05_resolve/main.py and the
+# switch in stratum_engine.cpp.
+CALL_DISPATCH = {
+    0: "call_v", 1: "call_z", 2: "call_i", 3: "call_i", 4: "call_i",
+    5: "call_i", 6: "call_j", 7: "call_d", 8: "call_d",
+    9: "call_str", 10: "call_o",
+}
+FIELD_GET_DISPATCH = {
+    1: "field_get_z", 2: "field_get_i", 3: "field_get_i",
+    4: "field_get_i", 5: "field_get_i", 6: "field_get_j",
+    7: "field_get_d", 8: "field_get_d",
+    9: "field_get_str", 10: "field_get_o",
+}
 
-# =============================================================================
-# Utilities
-# =============================================================================
+_CAMEL_RE1 = re.compile(r"(.)([A-Z][a-z]+)")
+_CAMEL_RE2 = re.compile(r"([a-z0-9])([A-Z])")
 
-def print_header(title: str) -> None:
-    print("==================================================")
-    print(f" {title}")
-    print("==================================================")
+
+def camel_to_snake(name: str) -> str:
+    """
+    setText        -> set_text
+    getURL         -> get_url        (handles runs of capitals)
+    isEnabled      -> is_enabled
+    onTouchEvent   -> on_touch_event
+    """
+    s1 = _CAMEL_RE1.sub(r"\1_\2", name)
+    s2 = _CAMEL_RE2.sub(r"\1_\2", s1)
+    out = s2.lower()
+    if out in ("class", "def", "return", "import", "from", "global", "id",
+               "type", "list", "dict", "str", "int", "float", "object"):
+        out += "_"
+    return out
 
 
 def sanitize_id(s: str) -> str:
+    """Make any Java identifier safe as a C/Python identifier. Inner
+    classes containing '$' become '_' (e.g. View$OnClickListener ->
+    View_OnClickListener) — this MUST match _normalize_fqn() in the
+    stratum_object.py template emitted below, character for character."""
     s = re.sub(r"[^a-zA-Z0-9_]", "_", s)
     if s and s[0].isdigit():
         s = "_" + s
-    s = re.sub(r"_+", "_", s).strip("_") or "_unknown"
-    if len(s) == 1:
-        s = "gen_" + s
-    return s
+    return re.sub(r"_+", "_", s).strip("_") or "_unknown"
 
 
-def safe_class_name(simple_name: str) -> str:
-    return sanitize_id(simple_name)
-
-
-def fqn_to_module_path(fqn: str) -> str:
+def fqn_to_module_parts(fqn: str) -> tuple:
     parts = fqn.split(".")
-    parts[-1] = sanitize_id(parts[-1])
-    return "/".join(parts)
+    pkg_parts = parts[:-1]
+    cls_name = sanitize_id(parts[-1])
+    return pkg_parts, cls_name
 
 
-# =============================================================================
-# Type mapping helpers (UPDATED for Stage 06 sync)
-# =============================================================================
-
-def python_type_for_param(p: dict) -> str:
-    conv = p.get("conversion", "")
-    if conv == "callable_to_proxy":
-        return "Callable[..., None]"
-    if conv in ("string_in", "string_out"):
-        return "str"
-    if conv in ("bool_in", "bool_out"):
-        return "bool"
-    
-    py = p.get("python_type", "")
-    if py in ("str", "bool", "int", "float", "None", "list"):
-        return py
-
-    java_type = p.get("java_type", "")
-    if java_type and "." in java_type:
-        simple_name = safe_class_name(java_type.split(".")[-1])
-        # [Action 42] Wrap in Optional if nullable
-        if p.get("nullable", True):
-            return f"Optional['{simple_name}']"
-        return f"'{simple_name}'"
-
-    return "object"
-
-
-def python_return_type(m: dict) -> str:
-    ret_conv = m.get("return_conversion", "none")
-    ret_py   = m.get("return_python", "")
-
-    if ret_conv == "string_out":
-        return "str"
-    if ret_conv == "bool_out":
-        return "bool"
-    if ret_conv == "none" and m.get("is_void", False):
-        return "None"
-    if m.get("return_jni", "") == "void":
-        return "None"
-
-    if ret_py in ("str", "bool", "int", "float", "None", "list"):
-        return ret_py
-
-    sig = m.get("jni_signature", "")
-    if ")" in sig:
-        ret_sig = sig.split(")")[-1]
-        if ret_sig.startswith("L") and ret_sig.endswith(";"):
-            java_type = ret_sig[1:-1].replace("/", ".")
-            # [Action 41] Direct ByteBuffer typing
-            if java_type == "java.nio.ByteBuffer":
-                return "Union[bytes, memoryview]"
-            simple_name = safe_class_name(java_type.split(".")[-1])
-            return f"'{simple_name}'"
-
-    return "object"
+# v9 FIX: extended to cover every tag emitted by 05_resolve's v9
+# compute_param_tags(). Without this, an overload whose FIRST
+# differing parameter is e.g. an int[] ("]") or a List ("M") would
+# fall through to the "True" default and always match the first
+# overload tried, regardless of what was actually passed.
+_OVERLOAD_TYPE_CHECK = {
+    "I": "isinstance(args[0], int)",
+    "J": "isinstance(args[0], int)",
+    "S": "isinstance(args[0], int)",
+    "B": "isinstance(args[0], int)",
+    "s": "isinstance(args[0], str)",
+    "F": "isinstance(args[0], (float, int))",
+    "D": "isinstance(args[0], (float, int))",
+    "Z": "isinstance(args[0], bool)",
+    "[": "isinstance(args[0], (bytes, bytearray))",
+    "]": "isinstance(args[0], list)",
+    "q": "isinstance(args[0], list)",
+    "f": "isinstance(args[0], list)",
+    "d": "isinstance(args[0], list)",
+    "b": "isinstance(args[0], list)",
+    "c": "isinstance(args[0], list)",
+    "h": "isinstance(args[0], list)",
+    "T": "isinstance(args[0], list)",
+    "A": "isinstance(args[0], list)",
+    "M": "isinstance(args[0], list)",
+}
 
 
-# Helper to format a single parameter handling varargs [Action 38]
-def format_param(p: dict) -> str:
-    pname = sanitize_id(p.get("name", f"arg{p.get('index', 0)}"))
-    ptype = python_type_for_param(p)
-    if p.get("is_varargs", False):
-        return f"*{pname}: {ptype}"
-    return f"{pname}: {ptype}"
+def _overload_condition(tag0: str, param0: dict) -> str:
+    """Build the runtime disambiguation check for the FIRST differing
+    parameter between two overloads sharing the same argument count.
+    Primitives/strings/arrays use the static table above. Plain-object
+    params (tag 'L') have no static type info in Python, so instead of
+    always matching (the old bug — this silently picked whichever
+    overload sorted first alphabetically, e.g. Handler(Callback) beating
+    Handler(Looper) every time), compare the wrapped object's concrete
+    Java FQN against this overload's declared parameter type. Adapter/
+    proxy params ('a'/'p') accept a callable or dict with no _FQN, so
+    those still match by default — only concrete StratumObject args are
+    checked."""
+    if tag0 in _OVERLOAD_TYPE_CHECK:
+        return _OVERLOAD_TYPE_CHECK[tag0]
+    if tag0 in ("L", "a", "p"):
+        java_type = param0.get("java_type", "")
+        if java_type:
+            return (
+                f"(getattr(args[0], '_FQN', None) == '{java_type}') "
+                f"or not hasattr(args[0], '_FQN')"
+            )
+    return "True"
 
 
-# =============================================================================
-# Collect methods from Stage-05 enriched JSON
-# =============================================================================
+def build_method_dispatcher(group: list, class_id: int) -> list:
+    """Emits the Python body for one (possibly overloaded) method name.
+    `group` is the list of all overloads sharing the same Java method
+    name — usually length 1, sometimes more."""
+    first = group[0]
+    jname = first["name"]
+    py_name = sanitize_id(jname)
+    snake_name = camel_to_snake(jname)
+    is_static = first.get("is_static", False)
+    lines = []
 
-def collect_methods(cls: dict) -> tuple[list, list, list, list]:
-    constructors       = cls.get("constructors",       [])
-    declared_methods   = cls.get("declared_methods",   [])
-    overridden_methods = cls.get("overridden_methods", [])
-    inherited_methods  = cls.get("inherited_methods",  [])
-
-    has_resolved = any([constructors, declared_methods,
-                        overridden_methods, inherited_methods])
-
-    if not has_resolved:
-        raw = cls.get("methods", [])
-        constructors = [m for m in raw if m.get("is_constructor")]
-        non_ctor     = [m for m in raw if not m.get("is_constructor")]
-        static_methods   = [m for m in non_ctor if m.get("is_static")]
-        instance_methods = [m for m in non_ctor if not m.get("is_static")]
-        return constructors, instance_methods, static_methods, []
-
-    all_non_ctor = declared_methods + overridden_methods
-    static_methods   = [m for m in all_non_ctor if m.get("is_static")]
-    instance_methods = [m for m in all_non_ctor if not m.get("is_static")]
-
-    return constructors, instance_methods, static_methods, inherited_methods
-
-
-def sig_key(method_name: str, params: list) -> str:
-    types = ",".join(python_type_for_param(p) for p in params)
-    return f"{method_name}({types})"
-
-
-# =============================================================================
-# Emit one class stub
-# =============================================================================
-
-def emit_class_pyi(cls: dict) -> str:
-    fqn         = cls.get("fqn", "")
-    simple_raw  = cls.get("simple_name", fqn.split(".")[-1])
-    py_cls_name = safe_class_name(simple_raw)
-
-    parent_fqn    = cls.get("parent_fqn", "")
-    parent_simple = ""
-    parent_import = ""
-
-    if parent_fqn and parent_fqn not in ("java.lang.Object", ""):
-        parent_raw    = parent_fqn.split(".")[-1]
-        parent_simple = safe_class_name(parent_raw)
-        parent_pkg    = ".".join(parent_fqn.split(".")[:-1])
-        parent_file   = sanitize_id(parent_raw)
-        parent_import = f"from stratum.{parent_pkg}.{parent_file} import {parent_simple}"
-
-    constructors, inst_methods, static_methods, inherited = collect_methods(cls)
-
-    lines: list[str] = []
-
-    lines.append(f"# {fqn}")
-    lines.append(f"# Auto-generated by Stratum Stage 08 — DO NOT EDIT")
-    lines.append(f"")
-    lines.append(f"from __future__ import annotations")
-    lines.append(f"from typing import Callable, Optional, List, Union")
-    lines.append(f"")
-
-    if parent_import:
-        lines.append(parent_import)
-        lines.append(f"")
-
-    if parent_simple:
-        lines.append(f"class {py_cls_name}({parent_simple}):")
+    if is_static:
+        lines.append("    @staticmethod")
+        lines.append(f"    def {py_name}(*args):")
     else:
-        lines.append(f"class {py_cls_name}:")
+        lines.append(f"    def {py_name}(self, *args):")
 
-    body_lines: list[str] = []
-    seen_ctor_sigs: set[str] = set()
+    def emit_call(m, indent="        "):
+        slot = m["slot"]
+        fn = CALL_DISPATCH.get(m.get("ret_type_id", 10), "call_o")
+        target = "0" if is_static else "self._ptr"
+        if m.get("ret_type_id") == 10 and m.get("return_fqn"):
+            # Object return with a statically-known Java type: resolve
+            # the wrapper class LAZILY at call time via _wrap_instance(),
+            # never at codegen time — this is what keeps "class depends
+            # on a class that might be excluded from this build" from
+            # ever becoming a crash on the Python side.
+            return (f"{indent}_ptr = _core.{fn}({target}, {class_id}, {slot}, *args)\n"
+                    f"{indent}return _wrap_instance(_ptr, '{m['return_fqn']}')")
+        return f"{indent}return _core.{fn}({target}, {class_id}, {slot}, *args)"
 
-    if not constructors:
-        body_lines.append(f"    def __init__(self) -> None: ...")
-    elif len(constructors) == 1:
-        ctor   = constructors[0]
-        params = ctor.get("params", [])
-        parts  = ["self"] + [format_param(p) for p in params]
-        body_lines.append(f"    def __init__({', '.join(parts)}) -> None: ...")
+    if len(group) == 1:
+        lines.append(emit_call(first))
     else:
-        body_lines.append(f"    from typing import overload")
-        for ctor in constructors:
-            params = ctor.get("params", [])
-            sk = sig_key("__init__", params)
-            if sk in seen_ctor_sigs:
-                continue
-            seen_ctor_sigs.add(sk)
-            parts = ["self"] + [format_param(p) for p in params]
-            body_lines.append(f"    @overload")
-            body_lines.append(f"    def __init__({', '.join(parts)}) -> None: ...")
+        by_argc = defaultdict(list)
+        for m in group:
+            by_argc[len(m.get("params", []))].append(m)
 
-    body_lines.append(f"")
+        lines.append("        argc = len(args)")
+        for argc, overloads in sorted(by_argc.items()):
+            lines.append(f"        if argc == {argc}:")
+            if len(overloads) == 1:
+                lines.append(emit_call(overloads[0], indent="            "))
+            else:
+                for ov in overloads:
+                    tag0 = ov["param_tags"][0] if ov["param_tags"] else "L"
+                    param0 = ov["params"][0] if ov.get("params") else {}
+                    cond = _overload_condition(tag0, param0)
+                    lines.append(f"            if {cond}:")
+                    lines.append(emit_call(ov, indent="                "))
 
-    seen_inst: set[str] = set()
-    inst_names: set[str] = set()
+        # Fallback: if nothing above matched exactly (e.g. a subclass of
+        # the expected type slipped through the isinstance check), still
+        # try the first overload's slot rather than raising NameError.
+        lines.append(emit_call(group[0], indent="        "))
 
-    for m in inst_methods:
-        raw_name = m.get("name", "unknown")
-        mname    = sanitize_id(raw_name)
-        params   = m.get("params", [])
-        ret      = python_return_type(m)
+    if snake_name != py_name:
+        lines.append(f"    {snake_name} = {py_name}")
+    lines.append("")
+    return lines
 
-        sk = sig_key(mname, params)
-        if sk in seen_inst:
-            continue
-        seen_inst.add(sk)
-        inst_names.add(mname)
 
-        parts = ["self"] + [format_param(p) for p in params]
-        body_lines.append(f"    def {mname}({', '.join(parts)}) -> {ret}: ...")
-
-    seen_inh: set[str] = set(seen_inst)
-    for m in inherited:
-        raw_name = m.get("name", "unknown")
-        mname    = sanitize_id(raw_name)
-        if m.get("is_static"):
-            continue
-        
-        inst_names.add(mname)
-        
-        params = m.get("params", [])
-        ret    = python_return_type(m)
-
-        sk = sig_key(mname, params)
-        if sk in seen_inh:
-            continue
-        seen_inh.add(sk)
-
-        parts = ["self"] + [format_param(p) for p in params]
-        declaring = m.get("declaring_class", "")
-        comment   = f"  # inherited from {declaring}" if declaring else "  # inherited"
-        body_lines.append(f"    def {mname}({', '.join(parts)}) -> {ret}: ...{comment}")
-
-    seen_static: set[str] = set()
-    for m in static_methods:
-        raw_name = m.get("name", "unknown")
-        mname    = sanitize_id(raw_name) + "_static"
-
-        params = m.get("params", [])
-        ret    = python_return_type(m)
-
-        sk = sig_key(mname, params)
-        if sk in seen_static:
-            continue
-        seen_static.add(sk)
-
-        parts = [format_param(p) for p in params]
-        body_lines.append(f"    @staticmethod")
-        body_lines.append(f"    def {mname}({', '.join(parts)}) -> {ret}: ...")
-
-    for f in cls.get("fields", []):
-        fname = sanitize_id(f.get("name", "UNKNOWN"))
-        # [Action 37] jchar maps to str now
-        ftype = {
-            "jboolean": "bool", "jbyte": "int", "jchar": "str", "jshort": "int",
-            "jint": "int", "jlong": "int", "jfloat": "float", "jdouble": "float",
-            "jstring": "str"
-        }.get(f.get("jni_type", ""), "object")
-        
+def build_field_accessors(fields: list, class_id: int) -> list:
+    """Emits sf_get_*/f_get_*/sf_set_* wrappers for every static/instance
+    field, mirroring field_get_*/field_set_* in stratum_engine.cpp."""
+    lines = []
+    for f in fields:
+        fslot = f.get("slot", 0)
+        fget = FIELD_GET_DISPATCH.get(f.get("ret_type_id", 10), "field_get_o")
+        fname = f.get("name", "")
         is_static = f.get("is_static", False)
-        is_final = f.get("is_final", False)
         prefix = "sf" if is_static else "f"
+        target = "0" if is_static else "self._ptr"
 
         if is_static:
-            body_lines.append(f"    @staticmethod")
-            body_lines.append(f"    def {prefix}_get_{fname}() -> {ftype}: ...")
-            if not is_final:
-                body_lines.append(f"    @staticmethod")
-                body_lines.append(f"    def {prefix}_set_{fname}(val: {ftype}) -> None: ...")
+            lines.append("    @staticmethod")
+            lines.append(f"    def {prefix}_get_{fname}():")
+            lines.append(f"        return _core.{fget}({target}, {class_id}, {fslot})")
         else:
-            body_lines.append(f"    def {prefix}_get_{fname}(self) -> {ftype}: ...")
-            if not is_final:
-                body_lines.append(f"    def {prefix}_set_{fname}(self, val: {ftype}) -> None: ...")
-    
-    body_lines.append(f"")
-    body_lines.append(f"    @staticmethod")
-    body_lines.append(f"    def _stratum_cast(obj: object) -> Optional['{py_cls_name}']: ...")
-    body_lines.append(f"    def _get_jobject_ptr(self) -> int: ...")
+            lines.append(f"    def {prefix}_get_{fname}(self):")
+            lines.append(f"        return _core.{fget}(self._ptr, {class_id}, {fslot})")
+        lines.append("")
 
-    non_empty = [l for l in body_lines if l.strip()]
-    if not non_empty:
-        body_lines.append(f"    ...")
+        # Only int-family fields get a generated setter (matches
+        # field_set_i in the engine). Add more setters on both sides
+        # together if mutable String/bool/object fields are needed.
+        if f.get("ret_type_id") in (2, 3, 4, 5) and not f.get("is_final", False):
+            if is_static:
+                lines.append("    @staticmethod")
+                lines.append(f"    def {prefix}_set_{fname}(val):")
+                lines.append(f"        _core.field_set_i({target}, {class_id}, {fslot}, val)")
+            else:
+                lines.append(f"    def {prefix}_set_{fname}(self, val):")
+                lines.append(f"        _core.field_set_i(self._ptr, {class_id}, {fslot}, val)")
+            lines.append("")
+    return lines
 
-    lines.extend(body_lines)
-    lines.append(f"")
-    return "\n".join(lines)
 
+def emit_python_class(data: dict) -> str:
+    fqn = data["fqn"]
+    class_id = data.get("class_id", 0)
+    _, simple = fqn_to_module_parts(fqn)
+    parent_fqn = data.get("parent_fqn", "")
 
-def emit_package_init(safe_simple_names: list[str]) -> str:
-    lines = ["# Auto-generated by Stratum Stage 08 — DO NOT EDIT", ""]
-    for name in sorted(set(safe_simple_names)):
-        lines.append(f"from .{name} import {name}")
+    lines = [
+        f"# Auto-generated Stratum wrapper for {fqn}. DO NOT EDIT.",
+        "from __future__ import annotations",
+        "import stratum._stratum as _core",
+        "from stratum.core.stratum_object import StratumObject, _wrap_instance, _get_parent_class",
+        "",
+        f"class {simple}(_get_parent_class('{parent_fqn}')):",
+        f'    """Wraps Java class `{fqn}`."""',
+        f"    _CLASS_ID = {class_id}",
+        f"    _FQN = '{fqn}'",
+        "",
+    ]
+
+    # ── Constructors ─────────────────────────────────────────────────
+    ctors = data.get("constructors", [])
+    lines.append("    def __init__(self, *args, _ptr=None) -> None:")
+    lines.append("        # _ptr is set when Stratum is wrapping an EXISTING jobject")
+    lines.append("        # pointer (e.g. as a method return value); otherwise *args")
+    lines.append("        # are forwarded to whichever constructor overload matches.")
+    lines.append("        if _ptr is not None:")
+    lines.append("            super().__init__(_ptr=_ptr)")
+    lines.append("            return")
+    if ctors:
+        by_argc = defaultdict(list)
+        for c in ctors:
+            by_argc[len(c.get("params", []))].append(c)
+        lines.append("        argc = len(args)")
+        for argc, c_list in sorted(by_argc.items()):
+            lines.append(f"        if argc == {argc}:")
+            if len(c_list) == 1:
+                slot = c_list[0]["slot"]
+                lines.append(f"            ptr = _core.new_instance({class_id}, {slot}, *args)")
+                lines.append("            super().__init__(_ptr=ptr)")
+                lines.append("            return")
+            else:
+                # v9 FIX: multiple constructors share this argc (e.g.
+                # Handler(Callback) vs Handler(Looper)) — disambiguate by
+                # the first parameter's type instead of always calling
+                # whichever constructor happened to sort first.
+                for c in c_list:
+                    tag0 = c["param_tags"][0] if c.get("param_tags") else "L"
+                    param0 = c["params"][0] if c.get("params") else {}
+                    cond = _overload_condition(tag0, param0)
+                    slot = c["slot"]
+                    lines.append(f"            if {cond}:")
+                    lines.append(f"                ptr = _core.new_instance({class_id}, {slot}, *args)")
+                    lines.append("                super().__init__(_ptr=ptr)")
+                    lines.append("                return")
+                # Fallback if nothing matched exactly.
+                fallback_slot = c_list[0]["slot"]
+                lines.append(f"            ptr = _core.new_instance({class_id}, {fallback_slot}, *args)")
+                lines.append("            super().__init__(_ptr=ptr)")
+                lines.append("            return")
+        first_slot = ctors[0]["slot"]
+        lines.append(f"        ptr = _core.new_instance({class_id}, {first_slot}, *args)")
+        lines.append("        super().__init__(_ptr=ptr)")
+    else:
+        lines.append("        super().__init__(_ptr=None)")
     lines.append("")
+
+    # ── Methods (grouped by name for overload dispatch) ─────────────
+    grouped = defaultdict(list)
+    for m in data.get("methods", []):
+        if not m.get("is_constructor"):
+            grouped[m["name"]].append(m)
+    for _, group in grouped.items():
+        lines.extend(build_method_dispatcher(group, class_id))
+
+    # ── Fields (static SDK constants + any mutable fields) ──────────
+    lines.extend(build_field_accessors(data.get("fields", []), class_id))
+
     return "\n".join(lines)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Stratum Stage 08 — Emit .pyi stubs from Stage 05 resolve output"
-    )
-    ap.add_argument("--input",  required=True,
-                    help="Path to 05_resolve/output/")
-    ap.add_argument("--output", required=True,
-                    help="Path to 08_pyi_emit/output/")
-    args = ap.parse_args()
+def emit_pyi_stub(data: dict) -> str:
+    fqn = data["fqn"]
+    _, simple = fqn_to_module_parts(fqn)
+    lines = [
+        f"# Stubs for {fqn}",
+        "from __future__ import annotations",
+        "from typing import Any, Optional",
+        "from stratum.core.stratum_object import StratumObject",
+        "",
+        f"class {simple}(StratumObject):",
+        "    def __init__(self, *args: Any, _ptr: Optional[int] = None) -> None: ...",
+    ]
+    grouped = defaultdict(list)
+    for m in data.get("methods", []):
+        if not m.get("is_constructor"):
+            grouped[m["name"]].append(m)
 
-    print_header("STRATUM PIPELINE - STAGE 08 (PYI EMIT)")
+    for jname, group in grouped.items():
+        py_name = sanitize_id(jname)
+        snake_name = camel_to_snake(jname)
+        m = group[0]
+        if m.get("is_static"):
+            lines.append("    @staticmethod")
+            lines.append(f"    def {py_name}(*args: Any) -> Any: ...")
+            if snake_name != py_name:
+                lines.append(f"    {snake_name} = {py_name}")
+        else:
+            lines.append(f"    def {py_name}(self, *args: Any) -> Any: ...")
+            if snake_name != py_name:
+                lines.append(f"    {snake_name} = {py_name}")
 
-    input_dir  = Path(args.input)
-    output_dir = Path(args.output)
+    for f in data.get("fields", []):
+        fname = f.get("name", "")
+        is_static = f.get("is_static", False)
+        prefix = "sf" if is_static else "f"
+        if is_static:
+            lines.append("    @staticmethod")
+            lines.append(f"    def {prefix}_get_{fname}() -> Any: ...")
+        else:
+            lines.append(f"    def {prefix}_get_{fname}(self) -> Any: ...")
 
-    if not input_dir.exists():
-        print(f"ERROR: Input not found: {input_dir}")
-        sys.exit(1)
+    return "\n".join(lines)
 
-    json_files = sorted(
-        f for f in input_dir.rglob("*.json")
-        if f.name not in ("parse_summary.json", "resolve_summary.json", "cpp_summary.json")
-    )
-    if not json_files:
-        print("ERROR: No JSON files found. Did Stage 05 succeed?")
-        sys.exit(1)
 
-    print(f"-> Found {len(json_files)} class JSON files")
+# v9: STRATUM_OBJECT_PY now distinguishes "class genuinely not in this
+# build" (silent, expected) from "class IS in this build but failed to
+# resolve" (a real bug — now printed as a warning instead of hidden).
+# Both success and failure are cached so resolution is deterministic for
+# the whole process lifetime instead of depending on import ordering.
+STRATUM_OBJECT_PY = '''# Auto-generated by Stratum Core. DO NOT EDIT.
+"""
+Base class for every generated Stratum wrapper, plus two lazy
+class-resolution helpers used everywhere in the generated tree.
 
-    all_classes: list[tuple[Path, dict]] = []
-    for jf in json_files:
-        try:
-            cls = json.loads(jf.read_text(encoding="utf-8"))
-            if cls.get("fqn"):
-                all_classes.append((jf, cls))
-        except Exception as e:
-            print(f"  WARN  {jf.name}: {e}")
+Why lazy resolution matters:
+    Every generated <ClassName>.py file needs to know its Python PARENT
+    class (for `class Foo(Bar):`) and, at call time, the Python RETURN
+    class for any method returning a Java object. Resolving either of
+    these EAGERLY at Stage 08 codegen time would reintroduce exactly the
+    problem this rewrite exists to remove: if that target class was
+    excluded from the build (targets.json filtering), Python would abort
+    at import time.
 
-    packages: dict[str, list[str]] = {}
-    output_dir.mkdir(parents=True, exist_ok=True)
-    failed: list[dict] = []
-    total = len(all_classes)
+    Instead, BOTH _get_parent_class() and _wrap_instance() import lazily
+    via importlib, cache the result (success OR failure), and fall back
+    to the generic StratumObject only when the class genuinely isn't
+    part of this build. Nothing in this tree can fail with an
+    ImportError bubbling up into your application code.
 
-    for i, (jf, cls) in enumerate(all_classes, 1):
-        try:
-            fqn        = cls["fqn"]
-            simple_raw = cls.get("simple_name", fqn.split(".")[-1])
-            py_name    = safe_class_name(simple_raw)
+v9: the fallback used to catch EVERY exception silently, which could
+    hide a real bug (a broken generated file, a genuine circular import)
+    behind a class that looks like it worked. Now:
+      - ModuleNotFoundError -> silent fallback (expected: class excluded
+        from this build via targets.json).
+      - any OTHER exception -> a warning is printed to stderr (once per
+        FQN) so a real problem is visible, THEN falls back to
+        StratumObject so the app keeps running instead of crashing.
+    Pass `--stratum-debug` as a sys.argv flag (e.g. via Chaquopy's
+    app args, or just append it in your own main.py before this module
+    is first imported) to get a full traceback for these warnings.
+"""
+import importlib
+import sys
+import traceback
+import stratum._stratum as _core
 
-            pkg_parts  = fqn.split(".")[:-1]
-            pkg_key    = "/".join(pkg_parts)
-            packages.setdefault(pkg_key, []).append(py_name)
+_class_cache = {}      # fqn -> resolved class (success cache)
+_failed_fqns = set()   # fqn -> already warned about (avoid log spam)
 
-            pyi_path = output_dir / Path(*pkg_parts) / f"{py_name}.pyi"
-            pyi_path.parent.mkdir(parents=True, exist_ok=True)
 
-            pyi_text = emit_class_pyi(cls)
-            pyi_path.write_text(pyi_text, encoding="utf-8")
+def _normalize_fqn(fqn: str) -> tuple:
+    """Java: android.view.View$OnClickListener
+       -> pkg="android.view", cls_name="View_OnClickListener"
+    MUST match sanitize_id()'s "$" -> "_" substitution in
+    08_pyi_emit/main.py exactly, or inner-class imports will fail."""
+    import re
+    parts = fqn.split(".")
+    pkg = ".".join(parts[:-1])
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", parts[-1])
+    if s and s[0].isdigit():
+        s = "_" + s
+    cls_name = re.sub(r"_+", "_", s).strip("_") or "_unknown"
+    return pkg, cls_name
 
-        except Exception as e:
-            failed.append({"file": str(jf), "error": str(e)})
-            print(f"  [{i:4d}/{total}] FAIL  {jf.name}  ->  {e}")
 
-    for pkg_key, names in packages.items():
-        init_path = output_dir / Path(pkg_key) / "__init__.pyi"
-        init_path.write_text(emit_package_init(names), encoding="utf-8")
+def _warn_once(fqn: str, context: str, exc: Exception) -> None:
+    if fqn in _failed_fqns:
+        return
+    _failed_fqns.add(fqn)
+    print(f"[Stratum] WARNING: {context} for '{fqn}' failed "
+          f"({type(exc).__name__}: {exc}); falling back to StratumObject.",
+          file=sys.stderr)
+    if "--stratum-debug" in sys.argv:
+        traceback.print_exc()
 
-    # [Actions 39 & 40] Write Top-level android/__init__.pyi with Base classes
-    top_init = output_dir / "android" / "__init__.pyi"
-    top_init.parent.mkdir(parents=True, exist_ok=True)
-    
-    top_init_content = """# Auto-generated by Stratum Stage 08 — DO NOT EDIT
-from typing import Optional
+
+def _get_parent_class(parent_fqn: str):
+    if not parent_fqn or parent_fqn in ("java.lang.Object", ""):
+        return StratumObject
+
+    cached = _class_cache.get(parent_fqn)
+    if cached is not None:
+        return cached
+
+    try:
+        pkg, cls_name = _normalize_fqn(parent_fqn)
+        mod = importlib.import_module(f"stratum.{pkg}.{cls_name}")
+        cls = getattr(mod, cls_name)
+        _class_cache[parent_fqn] = cls
+        return cls
+    except ModuleNotFoundError:
+        # Expected: this class simply wasn't included in the build
+        # (excluded by 05_resolve/targets.json). Silent, no warning.
+        _class_cache[parent_fqn] = StratumObject
+        return StratumObject
+    except Exception as e:
+        # NOT expected: the module exists but something in it is
+        # actually broken. Surface it instead of hiding it.
+        _warn_once(parent_fqn, "resolving parent class", e)
+        _class_cache[parent_fqn] = StratumObject
+        return StratumObject
+
+
+def _wrap_instance(ptr: int, fqn: str):
+    if not ptr:
+        return None
+
+    cached = _class_cache.get(fqn)
+    if cached is not None:
+        return cached(_ptr=ptr)
+
+    try:
+        pkg, cls_name = _normalize_fqn(fqn)
+        mod = importlib.import_module(f"stratum.{pkg}.{cls_name}")
+        cls = getattr(mod, cls_name)
+        _class_cache[fqn] = cls
+        return cls(_ptr=ptr)
+    except ModuleNotFoundError:
+        _class_cache[fqn] = StratumObject
+        return StratumObject(_ptr=ptr)
+    except Exception as e:
+        _warn_once(fqn, "wrapping return value", e)
+        _class_cache[fqn] = StratumObject
+        return StratumObject(_ptr=ptr)
+
 
 class StratumObject:
-    def is_null(self) -> bool: ...
-    def to_string(self) -> str: ...
-    def hash_code(self) -> int: ...
-    def instanceof_check(self, jni_class_name: str) -> bool: ...
-    def class_name(self) -> str: ...
+    """Base class for all Stratum Java object wrappers. Owns a JNI
+    global reference and releases it automatically when garbage
+    collected (see delete_ref() in stratum_engine.cpp for why the C++
+    side specifically attaches the calling thread before freeing it)."""
 
-class StratumThrowable(StratumObject):
-    def get_message(self) -> str: ...
-    def get_class_name(self) -> str: ...
+    def __init__(self, _ptr: int = None) -> None:
+        self._ptr = _ptr
 
-class StratumWeakObject:
-    def get(self) -> Optional[StratumObject]: ...
-    def is_enqueued(self) -> bool: ...
+    def __del__(self) -> None:
+        ptr = getattr(self, "_ptr", None)
+        if ptr:
+            _core.delete_ref(ptr)
+            self._ptr = None
 
-class StratumSurface(StratumObject):
-    def has_window(self) -> bool: ...
-"""
-    top_init.write_text(top_init_content, encoding="utf-8")
+    def _get_jobject_ptr(self) -> int:
+        return self._ptr or 0
 
-    summary = {
-        "stage":        "08_pyi_emit",
-        "input_dir":    str(input_dir),
-        "output_dir":   str(output_dir),
-        "total_stubs":  total - len(failed),
-        "total_failed": len(failed),
-        "packages":     sorted(packages.keys()),
-        "failed_files": failed,
-    }
-    (output_dir / "pyi_summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
+    def __bool__(self) -> bool:
+        return bool(self._ptr)
 
-    print()
-    print_header("STAGE 08 COMPLETE")
-    print(f"-> Stubs emitted : {total - len(failed):,} / {total:,}")
-    print(f"-> Packages      : {len(packages):,}")
-    print(f"-> Failed        : {len(failed):,}")
-    print(f"-> Output        : {output_dir}")
+    def __eq__(self, other) -> bool:
+        return isinstance(other, StratumObject) and self._ptr == other._ptr
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} ptr=0x{self._ptr or 0:x}>"
+'''
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Stratum Stage 08 - Python & Stub Emitter (v9)")
+    ap.add_argument("--input", required=True,
+                     help="05_resolve/output_patched/ (the SECOND-pass output)")
+    ap.add_argument("--output", required=True, help="08_pyi_emit/output/")
+    args = ap.parse_args()
+
+    print("=" * 70)
+    print("  STRATUM PIPELINE — STAGE 08 (PYTHON WRAPPER & STUB EMIT) v9")
+    print("=" * 70)
+
+    input_dir, output_dir = Path(args.input), Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    core_dir = output_dir / "stratum" / "core"
+    core_dir.mkdir(parents=True, exist_ok=True)
+    (core_dir / "stratum_object.py").write_text(STRATUM_OBJECT_PY, encoding="utf-8")
+    (core_dir / "__init__.py").write_text(
+        "from .stratum_object import StratumObject, _wrap_instance, _get_parent_class\n",
+        encoding="utf-8")
+
+    json_files = sorted(f for f in input_dir.rglob("*.json")
+                         if f.name not in ("parse_summary.json", "resolve_summary.json", "manifest.json"))
+    print(f"-> Emitting {len(json_files):,} Python classes.")
+
+    packages = set()
+    for jf in json_files:
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+            fqn = data.get("fqn", "")
+            if not fqn:
+                continue
+
+            pkg_parts, simple = fqn_to_module_parts(fqn)
+            dest_dir = output_dir / "stratum" / Path(*pkg_parts)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            (dest_dir / f"{simple}.py").write_text(emit_python_class(data), encoding="utf-8")
+            (dest_dir / f"{simple}.pyi").write_text(emit_pyi_stub(data), encoding="utf-8")
+
+            for i in range(len(pkg_parts)):
+                packages.add(output_dir / "stratum" / Path(*pkg_parts[: i + 1]))
+        except Exception as e:
+            print(f"  [WARN] {jf.name}: {e}")
+
+    for pkg in packages:
+        init_py, init_pyi = pkg / "__init__.py", pkg / "__init__.pyi"
+        if not init_py.exists():
+            init_py.write_text("# Stratum Package\n", encoding="utf-8")
+        if not init_pyi.exists():
+            init_pyi.write_text("# Stratum Package Stubs\n", encoding="utf-8")
+
+    print(f"-> Output generated in: {output_dir / 'stratum'}")
+
 
 if __name__ == "__main__":
     main()

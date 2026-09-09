@@ -2,6 +2,10 @@
 # Ignores any directory named "output" or "output_java" anywhere in the project
 output/
 output_java/
+/output_patched/
+*output_patched/
+*/output_patched/
+output_patched/*
 
 # Ignores all "note.txt" files across all folders (00_setup, 01_extract, etc.)
 note.txt

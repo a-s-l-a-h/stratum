@@ -4,44 +4,47 @@ project(stratum CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Chaquopy Python ───────────────────────────────────────────────────────────
-# Headers: needed at compile time for nanobind
-# libpython: linked dynamically — Chaquopy provides it on device at runtime
-#            We link it here so the linker is satisfied, but the actual
-#            libpython3.12.so comes from Chaquopy, not bundled in our .so
+# STRATUM_LOG_LEVEL: 0 = production (LOGD/LOGV fully stripped, zero cost),
+# 1 = basic logging, 2 = deep/trace logging. Passed in by 07_build/main.py
+# via --log-level. Never edit this file to change the level — use the
+# command-line flag instead, so the value stays in one place.
+if(NOT DEFINED STRATUM_LOG_LEVEL)
+    set(STRATUM_LOG_LEVEL 0)
+endif()
+
 set(STRATUM_PYTHON_VERSION "{{PYTHON_VERSION}}")
 set(STRATUM_PYTHON_INCLUDE "{{PYTHON_INCLUDE}}")
 set(STRATUM_PYTHON_LIB_DIR "{{PYTHON_LIB_DIR}}")
 
-# ── nanobind ──────────────────────────────────────────────────────────────────
 add_subdirectory("{{NANOBIND_DIR}}" nanobind EXCLUDE_FROM_ALL)
 
-# ── Source files ──────────────────────────────────────────────────────────────
+# Stratum v9: exactly 4 static C++ files, regardless of how many Java
+# classes the metadata table describes. This is why compile time no
+# longer grows with the size of the Android API surface you include —
+# only the size of the generated metadata_table.cpp DATA does.
 set(STRATUM_SOURCES
-{{SOURCE_FILES}}
+    "{{CORE_INCLUDE_DIR}}/bridge_core.cpp"
+    "{{CORE_INCLUDE_DIR}}/stratum_engine.cpp"
+    "{{CORE_INCLUDE_DIR}}/metadata_table.cpp"
+    "{{CORE_INCLUDE_DIR}}/bridge_main.cpp"
 )
 
-# ── Build as nanobind module ──────────────────────────────────────────────────
-# NB_STATIC = nanobind statically linked INTO stratum.so (single .so goal)
-# libpython is NOT statically linked — Chaquopy provides it at runtime
 nanobind_add_module(_stratum NB_STATIC ${STRATUM_SOURCES})
 
-# ── Include directories ───────────────────────────────────────────────────────
 target_include_directories(_stratum PRIVATE
     "{{CORE_INCLUDE_DIR}}"
     "${STRATUM_PYTHON_INCLUDE}"
 )
 
-# ── Compile options ───────────────────────────────────────────────────────────
+target_compile_definitions(_stratum PRIVATE STRATUM_LOG_LEVEL=${STRATUM_LOG_LEVEL})
+
 target_compile_options(_stratum PRIVATE
     -O2
     -Wno-unused-parameter
-    -Wno-unused-variable
     -ffunction-sections
     -fdata-sections
 )
 
-# ── Link libraries ────────────────────────────────────────────────────────────
 find_library(log-lib log)
 find_library(android-lib android)
 
@@ -52,25 +55,13 @@ target_link_libraries(_stratum PRIVATE
     "-lpython${STRATUM_PYTHON_VERSION}"
 )
 
-# Link libpython dynamically from Chaquopy target
-# This satisfies the linker for Python C API symbols (Py_Dealloc etc)
-# The actual libpython3.12.so is provided by Chaquopy on device — not bundled
-
-
-
 target_link_options(_stratum PRIVATE
     -Wl,--gc-sections
-    -Wl,--exclude-libs,ALL
-    -Wl,--strip-all
     -Wl,--as-needed
 )
 
-# ── Output ────────────────────────────────────────────────────────────────────
 set_target_properties(_stratum PROPERTIES
     OUTPUT_NAME "_stratum"
     PREFIX      ""
     SUFFIX      ".so"
-    BUILD_RPATH ""
-    INSTALL_RPATH ""
-    BUILD_WITH_INSTALL_RPATH TRUE
 )
