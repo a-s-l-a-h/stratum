@@ -48,3 +48,5 @@ __pycache__/
 *.swo
 .DS_Store
 Thumbs.db
+# ── Python Virtual Environment ────────────────────────────────────────────────
+.venv/
