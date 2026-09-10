@@ -96,6 +96,38 @@ def release_native_window(win_ptr: int) -> None:
     """Release an ANativeWindow* handle previously acquired."""
     _core.release_native_window(win_ptr)
 
+
+def to_java(obj):
+    """Recursively converts Python data (dict, list, int, float, bool, str, bytes)
+    into a real Java object (HashMap, ArrayList, Boxed primitives, byte[]).
+    Existing StratumObject instances retain their underlying Java reference."""
+    if obj is None:
+        return None
+    if hasattr(obj, "_ptr"):
+        return obj
+    ptr = _core.to_java(obj)
+    if not ptr:
+        return None
+    return StratumObject(_ptr=ptr)
+
+
+def to_py(obj):
+    """Recursively converts Java objects (Map, List, Bundle, boxed primitives,
+    and arrays) into native Python data (dict, list, int, float, bool, str, bytes).
+    Non-data Java objects are wrapped into typed StratumObject instances."""
+    if obj is None:
+        return None
+    # 100% DEFENSIVE GUARD: If the object does not have _ptr, it is ALREADY native
+    # Python data (e.g. an int, bool, float, str, list, dict). Never treat a bare
+    # Python numeric value as a raw JNI memory address!
+    if not hasattr(obj, "_ptr"):
+        return obj
+    ptr = getattr(obj, "_ptr", None)
+    if not isinstance(ptr, int) or ptr == 0:
+        return None
+    return _core.to_py(ptr)
+
+
 def remove_callback(key: str) -> None:
     """Release a stored Python callback (listener/adapter) by its key,
     if you tracked it. Reduces the g_callbacks map growth flagged by the

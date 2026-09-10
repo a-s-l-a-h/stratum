@@ -153,6 +153,25 @@ NB_MODULE(_stratum, m) {
     m.def("surface_to_native_window", &surface_to_native_window);
     m.def("release_native_window", &release_native_window);
 
+    m.def("to_java", [](nb::object val) -> int64_t {
+        if (val.is_none()) return 0;
+        JNIEnv* env = get_env();
+        if (!env) return 0;
+        JniLocalFrame frame(env, 32);
+        jobject jo = stratum_py_to_java(env, val);
+        if (!jo) return 0;
+        jobject gref = env->NewGlobalRef(jo);
+        return (int64_t)(uintptr_t)gref;
+    });
+
+    m.def("to_py", [](int64_t ptr) -> nb::object {
+        if (!ptr) return nb::none();
+        JNIEnv* env = get_env();
+        if (!env) return nb::none();
+        JniLocalFrame frame(env, 32);
+        return stratum_java_to_py(env, (jobject)(uintptr_t)ptr);
+    });
+
     m.def("get_activity_ptr", []() -> int64_t {
         std::lock_guard<std::mutex> lk(g_activity_mutex);
         if (!g_activity) return 0;

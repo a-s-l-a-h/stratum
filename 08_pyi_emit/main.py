@@ -179,7 +179,8 @@ _OVERLOAD_TYPE_CHECK = {
     "h": "isinstance(args[0], list)",
     "T": "isinstance(args[0], list)",
     "A": "isinstance(args[0], list)",
-    "M": "isinstance(args[0], list)",
+    "M": "(isinstance(args[0], (list, tuple, set)) or hasattr(args[0], '_ptr'))",
+    "N": "(isinstance(args[0], dict) or hasattr(args[0], '_ptr'))",
 }
 
 

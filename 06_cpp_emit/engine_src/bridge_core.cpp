@@ -294,6 +294,585 @@ nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
     return result;
 }
 
+// ── Bidirectional Data Serialization Bridge ─────────────────────────────────
+
+static constexpr int STRATUM_MAX_RECURSION_DEPTH = 64;
+
+jobject stratum_py_to_java(JNIEnv* env, nb::handle obj, int depth) {
+    if (!env || obj.is_none()) return nullptr;
+    if (depth > STRATUM_MAX_RECURSION_DEPTH) {
+        LOGE("Stratum: maximum serialization depth exceeded in stratum_py_to_java");
+        return nullptr;
+    }
+
+    // 1. Existing Java Object reference: return a local reference to avoid mutating GlobalRefs
+    if (nb::hasattr(obj, "_ptr")) {
+        int64_t p = nb::cast<int64_t>(obj.attr("_ptr"));
+        if (!p) return nullptr;
+        return env->NewLocalRef((jobject)(uintptr_t)p);
+    }
+
+    // 2. Boolean (must precede int_ check because bool inherits from int in Python)
+    if (nb::isinstance<nb::bool_>(obj)) {
+        static jclass s_bool_cls = nullptr;
+        static jmethodID s_bool_valueOf = nullptr;
+        if (!s_bool_cls) {
+            jclass c = find_class(env, "java/lang/Boolean");
+            if (c) {
+                jmethodID mid = env->GetStaticMethodID(c, "valueOf", "(Z)Ljava/lang/Boolean;");
+                if (mid) {
+                    s_bool_valueOf = mid;
+                    s_bool_cls = (jclass)env->NewGlobalRef(c);
+                }
+                env->DeleteLocalRef(c);
+            }
+        }
+        if (s_bool_cls && s_bool_valueOf) {
+            return env->CallStaticObjectMethod(s_bool_cls, s_bool_valueOf, nb::cast<bool>(obj) ? JNI_TRUE : JNI_FALSE);
+        }
+        return nullptr;
+    }
+
+    // 3. Integer: Box into Integer (or Long if exceeding 32-bit range)
+    if (nb::isinstance<nb::int_>(obj)) {
+        int64_t v = nb::cast<int64_t>(obj);
+        if (v >= -2147483648LL && v <= 2147483647LL) {
+            static jclass s_int_cls = nullptr;
+            static jmethodID s_int_valueOf = nullptr;
+            if (!s_int_cls) {
+                jclass c = find_class(env, "java/lang/Integer");
+                if (c) {
+                    jmethodID mid = env->GetStaticMethodID(c, "valueOf", "(I)Ljava/lang/Integer;");
+                    if (mid) {
+                        s_int_valueOf = mid;
+                        s_int_cls = (jclass)env->NewGlobalRef(c);
+                    }
+                    env->DeleteLocalRef(c);
+                }
+            }
+            if (s_int_cls && s_int_valueOf) {
+                return env->CallStaticObjectMethod(s_int_cls, s_int_valueOf, (jint)v);
+            }
+        } else {
+            static jclass s_long_cls = nullptr;
+            static jmethodID s_long_valueOf = nullptr;
+            if (!s_long_cls) {
+                jclass c = find_class(env, "java/lang/Long");
+                if (c) {
+                    jmethodID mid = env->GetStaticMethodID(c, "valueOf", "(J)Ljava/lang/Long;");
+                    if (mid) {
+                        s_long_valueOf = mid;
+                        s_long_cls = (jclass)env->NewGlobalRef(c);
+                    }
+                    env->DeleteLocalRef(c);
+                }
+            }
+            if (s_long_cls && s_long_valueOf) {
+                return env->CallStaticObjectMethod(s_long_cls, s_long_valueOf, (jlong)v);
+            }
+        }
+        return nullptr;
+    }
+
+    // 4. Float -> Double
+    if (nb::isinstance<nb::float_>(obj)) {
+        static jclass s_dbl_cls = nullptr;
+        static jmethodID s_dbl_valueOf = nullptr;
+        if (!s_dbl_cls) {
+            jclass c = find_class(env, "java/lang/Double");
+            if (c) {
+                jmethodID mid = env->GetStaticMethodID(c, "valueOf", "(D)Ljava/lang/Double;");
+                if (mid) {
+                    s_dbl_valueOf = mid;
+                    s_dbl_cls = (jclass)env->NewGlobalRef(c);
+                }
+                env->DeleteLocalRef(c);
+            }
+        }
+        if (s_dbl_cls && s_dbl_valueOf) {
+            return env->CallStaticObjectMethod(s_dbl_cls, s_dbl_valueOf, (jdouble)nb::cast<double>(obj));
+        }
+        return nullptr;
+    }
+
+    // 5. String
+    if (nb::isinstance<nb::str>(obj)) {
+        return (jobject)stratum_str_to_jstring(env, nb::cast<std::string>(obj));
+    }
+
+    // 6. Bytes -> byte[]
+    if (nb::isinstance<nb::bytes>(obj)) {
+        nb::bytes b = nb::cast<nb::bytes>(obj);
+        jsize len = (jsize)b.size();
+        jbyteArray ja = env->NewByteArray(len);
+        if (len > 0) env->SetByteArrayRegion(ja, 0, len, reinterpret_cast<const jbyte*>(b.c_str()));
+        return (jobject)ja;
+    }
+
+    // 7. Dictionary -> HashMap (with sub-frame protection against local ref overflow)
+    if (nb::isinstance<nb::dict>(obj)) {
+        static jclass s_map_cls = nullptr;
+        static jmethodID s_map_init = nullptr;
+        static jmethodID s_map_put = nullptr;
+        if (!s_map_cls) {
+            jclass c = find_class(env, "java/util/HashMap");
+            if (c) {
+                jmethodID init = env->GetMethodID(c, "<init>", "()V");
+                jmethodID put  = env->GetMethodID(c, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+                if (init && put) {
+                    s_map_init = init;
+                    s_map_put  = put;
+                    s_map_cls  = (jclass)env->NewGlobalRef(c);
+                }
+                env->DeleteLocalRef(c);
+            }
+        }
+        if (!s_map_cls || !s_map_init || !s_map_put) return nullptr;
+
+        jobject jmap = env->NewObject(s_map_cls, s_map_init);
+        nb::dict d = nb::cast<nb::dict>(obj);
+        for (auto kv : d) {
+            JniLocalFrame loop_frame(env, 16);
+            jobject jk = stratum_py_to_java(env, kv.first, depth + 1);
+            jobject jv = stratum_py_to_java(env, kv.second, depth + 1);
+            jobject prev = env->CallObjectMethod(jmap, s_map_put, jk, jv);
+            if (prev) env->DeleteLocalRef(prev);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        }
+        return jmap;
+    }
+
+    // 8. List / Tuple / Set -> ArrayList (with sub-frame protection against local ref overflow)
+    if (nb::isinstance<nb::list>(obj) || nb::isinstance<nb::tuple>(obj) || nb::isinstance<nb::set>(obj)) {
+        static jclass s_list_cls = nullptr;
+        static jmethodID s_list_init = nullptr;
+        static jmethodID s_list_add = nullptr;
+        if (!s_list_cls) {
+            jclass c = find_class(env, "java/util/ArrayList");
+            if (c) {
+                jmethodID init = env->GetMethodID(c, "<init>", "()V");
+                jmethodID add  = env->GetMethodID(c, "add", "(Ljava/lang/Object;)Z");
+                if (init && add) {
+                    s_list_init = init;
+                    s_list_add  = add;
+                    s_list_cls  = (jclass)env->NewGlobalRef(c);
+                }
+                env->DeleteLocalRef(c);
+            }
+        }
+        if (!s_list_cls || !s_list_init || !s_list_add) return nullptr;
+
+        jobject jlist = env->NewObject(s_list_cls, s_list_init);
+        for (auto item : obj) {
+            JniLocalFrame loop_frame(env, 16);
+            jobject ji = stratum_py_to_java(env, item, depth + 1);
+            env->CallBooleanMethod(jlist, s_list_add, ji);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        }
+        return jlist;
+    }
+
+    return nullptr;
+}
+
+nb::object stratum_java_to_py(JNIEnv* env, jobject obj, int depth) {
+    if (!env || !obj) return nb::none();
+    if (depth > STRATUM_MAX_RECURSION_DEPTH) {
+        LOGE("Stratum: maximum serialization depth exceeded in stratum_java_to_py");
+        return nb::none();
+    }
+    JniLocalFrame frame(env, 32);
+
+    // 1. String / CharSequence
+    if (g_jstring_class && env->IsInstanceOf(obj, g_jstring_class)) {
+        return nb::str(stratum_jstring_to_str(env, obj).c_str());
+    }
+
+    // 2. Boolean
+    static jclass s_bool_w = nullptr;
+    static jmethodID s_bool_val = nullptr;
+    if (!s_bool_w) {
+        jclass c = find_class(env, "java/lang/Boolean");
+        if (c) {
+            jmethodID mid = env->GetMethodID(c, "booleanValue", "()Z");
+            if (mid) {
+                s_bool_val = mid;
+                s_bool_w = (jclass)env->NewGlobalRef(c);
+            }
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (s_bool_w && env->IsInstanceOf(obj, s_bool_w)) {
+        return nb::bool_(env->CallBooleanMethod(obj, s_bool_val) != JNI_FALSE);
+    }
+
+    // 3. Character (Java Character extends Object, not Number)
+    static jclass s_char_w = nullptr;
+    static jmethodID s_char_val = nullptr;
+    if (!s_char_w) {
+        jclass c = find_class(env, "java/lang/Character");
+        if (c) {
+            jmethodID mid = env->GetMethodID(c, "charValue", "()C");
+            if (mid) {
+                s_char_val = mid;
+                s_char_w = (jclass)env->NewGlobalRef(c);
+            }
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (s_char_w && env->IsInstanceOf(obj, s_char_w)) {
+        jchar jc = env->CallCharMethod(obj, s_char_val);
+        std::string utf8;
+        if (jc < 0x80) utf8 += (char)jc;
+        else if (jc < 0x800) { utf8 += (char)(0xC0 | (jc >> 6)); utf8 += (char)(0x80 | (jc & 0x3F)); }
+        else { utf8 += (char)(0xE0 | (jc >> 12)); utf8 += (char)(0x80 | ((jc >> 6) & 0x3F)); utf8 += (char)(0x80 | (jc & 0x3F)); }
+        return nb::str(utf8.data(), utf8.size());
+    }
+
+    // 4. Number (Integer, Long, Byte, Short, Float, Double)
+    static jclass s_num_w = nullptr;
+    static jmethodID s_num_double = nullptr;
+    static jmethodID s_num_long = nullptr;
+    static jclass s_flt_w = nullptr;
+    static jclass s_dbl_w = nullptr;
+    if (!s_num_w) {
+        jclass c = find_class(env, "java/lang/Number");
+        if (c) {
+            s_num_double = env->GetMethodID(c, "doubleValue", "()D");
+            s_num_long   = env->GetMethodID(c, "longValue", "()J");
+            s_num_w = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+        jclass cf = find_class(env, "java/lang/Float");
+        if (cf) {
+            s_flt_w = (jclass)env->NewGlobalRef(cf);
+            env->DeleteLocalRef(cf);
+        }
+        jclass cd = find_class(env, "java/lang/Double");
+        if (cd) {
+            s_dbl_w = (jclass)env->NewGlobalRef(cd);
+            env->DeleteLocalRef(cd);
+        }
+    }
+    if (s_num_w && env->IsInstanceOf(obj, s_num_w)) {
+        if ((s_flt_w && env->IsInstanceOf(obj, s_flt_w)) || (s_dbl_w && env->IsInstanceOf(obj, s_dbl_w))) {
+            return nb::float_(env->CallDoubleMethod(obj, s_num_double));
+        } else {
+            return nb::int_((int64_t)env->CallLongMethod(obj, s_num_long));
+        }
+    }
+
+    // 5. Primitive and Object Arrays
+    jclass obj_cls = env->GetObjectClass(obj);
+    jclass cls_cls = g_class_class ? g_class_class : env->FindClass("java/lang/Class");
+    jmethodID mid_isArray = cls_cls ? env->GetMethodID(cls_cls, "isArray", "()Z") : nullptr;
+    bool is_array = (mid_isArray && env->CallBooleanMethod(obj_cls, mid_isArray));
+    if (!g_class_class && cls_cls) env->DeleteLocalRef(cls_cls);
+
+    if (is_array) {
+        static jclass s_ba_cls = nullptr, s_ia_cls = nullptr, s_fa_cls = nullptr,
+                      s_ja_cls = nullptr, s_da_cls = nullptr, s_za_cls = nullptr,
+                      s_ca_cls = nullptr, s_sa_cls = nullptr, s_oa_cls = nullptr;
+        if (!s_ba_cls) {
+            auto cache_arr = [&](const char* sig) -> jclass {
+                jclass c = env->FindClass(sig);
+                if (!c) { env->ExceptionClear(); return nullptr; }
+                jclass g = (jclass)env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
+                return g;
+            };
+            s_ba_cls = cache_arr("[B");
+            s_ia_cls = cache_arr("[I");
+            s_fa_cls = cache_arr("[F");
+            s_ja_cls = cache_arr("[J");
+            s_da_cls = cache_arr("[D");
+            s_za_cls = cache_arr("[Z");
+            s_ca_cls = cache_arr("[C");
+            s_sa_cls = cache_arr("[S");
+            s_oa_cls = cache_arr("[Ljava/lang/Object;");
+        }
+
+        // byte[] -> bytes
+        if (s_ba_cls && env->IsInstanceOf(obj, s_ba_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jbyteArray ba = (jbyteArray)obj;
+            jsize len = env->GetArrayLength(ba);
+            jbyte* buf = env->GetByteArrayElements(ba, nullptr);
+            nb::bytes out(reinterpret_cast<const char*>(buf), (size_t)len);
+            env->ReleaseByteArrayElements(ba, buf, JNI_ABORT);
+            return out;
+        }
+
+        // int[] -> list[int]
+        if (s_ia_cls && env->IsInstanceOf(obj, s_ia_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jintArray ia = (jintArray)obj;
+            jsize len = env->GetArrayLength(ia);
+            std::vector<jint> buf(len);
+            if (len > 0) env->GetIntArrayRegion(ia, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+            return out;
+        }
+
+        // float[] -> list[float]
+        if (s_fa_cls && env->IsInstanceOf(obj, s_fa_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jfloatArray fa = (jfloatArray)obj;
+            jsize len = env->GetArrayLength(fa);
+            std::vector<jfloat> buf(len);
+            if (len > 0) env->GetFloatArrayRegion(fa, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::float_((double)buf[i]));
+            return out;
+        }
+
+        // long[] -> list[int]
+        if (s_ja_cls && env->IsInstanceOf(obj, s_ja_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jlongArray ja = (jlongArray)obj;
+            jsize len = env->GetArrayLength(ja);
+            std::vector<jlong> buf(len);
+            if (len > 0) env->GetLongArrayRegion(ja, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+            return out;
+        }
+
+        // double[] -> list[float]
+        if (s_da_cls && env->IsInstanceOf(obj, s_da_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jdoubleArray da = (jdoubleArray)obj;
+            jsize len = env->GetArrayLength(da);
+            std::vector<jdouble> buf(len);
+            if (len > 0) env->GetDoubleArrayRegion(da, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::float_(buf[i]));
+            return out;
+        }
+
+        // boolean[] -> list[bool]
+        if (s_za_cls && env->IsInstanceOf(obj, s_za_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jbooleanArray za = (jbooleanArray)obj;
+            jsize len = env->GetArrayLength(za);
+            std::vector<jboolean> buf(len);
+            if (len > 0) env->GetBooleanArrayRegion(za, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::bool_(buf[i] != JNI_FALSE));
+            return out;
+        }
+
+        // char[] -> str
+        if (s_ca_cls && env->IsInstanceOf(obj, s_ca_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jcharArray ca = (jcharArray)obj;
+            jsize len = env->GetArrayLength(ca);
+            std::vector<jchar> buf(len);
+            if (len > 0) env->GetCharArrayRegion(ca, 0, len, buf.data());
+            std::string utf8;
+            for (jsize i = 0; i < len; ) {
+                uint32_t cp; uint16_t c1 = (uint16_t)buf[i++];
+                if (c1 >= 0xD800 && c1 <= 0xDBFF && i < len) {
+                    uint16_t c2 = (uint16_t)buf[i];
+                    if (c2 >= 0xDC00 && c2 <= 0xDFFF) { cp = 0x10000u + (((uint32_t)(c1 - 0xD800u)) << 10) + (uint32_t)(c2 - 0xDC00u); ++i; }
+                    else cp = c1;
+                } else cp = c1;
+                if (cp < 0x80) utf8 += (char)cp;
+                else if (cp < 0x800) { utf8 += (char)(0xC0 | (cp >> 6)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+                else if (cp < 0x10000) { utf8 += (char)(0xE0 | (cp >> 12)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+                else { utf8 += (char)(0xF0 | (cp >> 18)); utf8 += (char)(0x80 | ((cp >> 12) & 0x3F)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+            }
+            return nb::str(utf8.data(), utf8.size());
+        }
+
+        // short[] -> list[int]
+        if (s_sa_cls && env->IsInstanceOf(obj, s_sa_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jshortArray sa = (jshortArray)obj;
+            jsize len = env->GetArrayLength(sa);
+            std::vector<jshort> buf(len);
+            if (len > 0) env->GetShortArrayRegion(sa, 0, len, buf.data());
+            nb::list out;
+            for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+            return out;
+        }
+
+        // Object[] -> recursive list
+        if (s_oa_cls && env->IsInstanceOf(obj, s_oa_cls)) {
+            env->DeleteLocalRef(obj_cls);
+            jsize len = env->GetArrayLength((jarray)obj);
+            nb::list py_arr;
+            for (jsize i = 0; i < len; ++i) {
+                JniLocalFrame item_frame(env, 16);
+                jobject elem = env->GetObjectArrayElement((jobjectArray)obj, i);
+                py_arr.append(stratum_java_to_py(env, elem, depth + 1));
+            }
+            return py_arr;
+        }
+        env->DeleteLocalRef(obj_cls);
+    } else {
+        env->DeleteLocalRef(obj_cls);
+    }
+
+    // 6. Map -> dict (recursive with concurrent modification safety)
+    static jclass s_map_iface = nullptr;
+    static jmethodID s_map_entrySet = nullptr;
+    static jclass s_entry_iface = nullptr;
+    static jmethodID s_entry_getKey = nullptr;
+    static jmethodID s_entry_getVal = nullptr;
+    if (!s_map_iface) {
+        jclass c = find_class(env, "java/util/Map");
+        if (c) {
+            s_map_entrySet = env->GetMethodID(c, "entrySet", "()Ljava/util/Set;");
+            s_map_iface = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+        jclass ec = find_class(env, "java/util/Map$Entry");
+        if (ec) {
+            s_entry_getKey = env->GetMethodID(ec, "getKey", "()Ljava/lang/Object;");
+            s_entry_getVal = env->GetMethodID(ec, "getValue", "()Ljava/lang/Object;");
+            s_entry_iface = (jclass)env->NewGlobalRef(ec);
+            env->DeleteLocalRef(ec);
+        }
+    }
+    if (s_map_iface && env->IsInstanceOf(obj, s_map_iface)) {
+        jobject es = env->CallObjectMethod(obj, s_map_entrySet);
+        nb::dict result;
+        if (es) {
+            jclass escls = env->GetObjectClass(es);
+            jmethodID esit = env->GetMethodID(escls, "iterator", "()Ljava/util/Iterator;");
+            env->DeleteLocalRef(escls);
+            jobject iter = env->CallObjectMethod(es, esit);
+            env->DeleteLocalRef(es);
+            if (iter) {
+                jclass ic = env->GetObjectClass(iter);
+                jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+                jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
+                env->DeleteLocalRef(ic);
+                while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                    JniLocalFrame item_frame(env, 16);
+                    jobject entry = env->CallObjectMethod(iter, mnx);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                    if (entry) {
+                        jobject ek = env->CallObjectMethod(entry, s_entry_getKey);
+                        jobject ev = env->CallObjectMethod(entry, s_entry_getVal);
+                        result[stratum_java_to_py(env, ek, depth + 1)] = stratum_java_to_py(env, ev, depth + 1);
+                    }
+                }
+                env->DeleteLocalRef(iter);
+            }
+        }
+        return result;
+    }
+
+    // 7. Collection / List / Set -> list (recursive with exception safety)
+    static jclass s_coll_iface = nullptr;
+    static jmethodID s_coll_iterator = nullptr;
+    if (!s_coll_iface) {
+        jclass c = find_class(env, "java/util/Collection");
+        if (c) {
+            s_coll_iterator = env->GetMethodID(c, "iterator", "()Ljava/util/Iterator;");
+            s_coll_iface = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (s_coll_iface && env->IsInstanceOf(obj, s_coll_iface)) {
+        jobject iter = env->CallObjectMethod(obj, s_coll_iterator);
+        nb::list result;
+        if (iter) {
+            jclass ic = env->GetObjectClass(iter);
+            jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+            jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
+            env->DeleteLocalRef(ic);
+            while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                JniLocalFrame item_frame(env, 16);
+                jobject item = env->CallObjectMethod(iter, mnx);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                result.append(stratum_java_to_py(env, item, depth + 1));
+            }
+            env->DeleteLocalRef(iter);
+        }
+        return result;
+    }
+
+    // 8. android.os.BaseBundle / Bundle -> dict (recursive with exception safety)
+    static jclass s_bundle_cls = nullptr;
+    static jmethodID s_bundle_keySet = nullptr;
+    static jmethodID s_bundle_get = nullptr;
+    static bool s_bundle_checked = false;
+    if (!s_bundle_checked) {
+        s_bundle_checked = true;
+        jclass c = find_class(env, "android/os/BaseBundle");
+        if (!c) { env->ExceptionClear(); c = find_class(env, "android/os/Bundle"); }
+        if (c) {
+            s_bundle_keySet = env->GetMethodID(c, "keySet", "()Ljava/util/Set;");
+            if (!s_bundle_keySet) env->ExceptionClear();
+            s_bundle_get = env->GetMethodID(c, "get", "(Ljava/lang/String;)Ljava/lang/Object;");
+            if (!s_bundle_get) env->ExceptionClear();
+            s_bundle_cls = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (s_bundle_cls && s_bundle_keySet && s_bundle_get && env->IsInstanceOf(obj, s_bundle_cls)) {
+        jobject keyset = env->CallObjectMethod(obj, s_bundle_keySet);
+        nb::dict result;
+        if (keyset) {
+            jclass kcls = env->GetObjectClass(keyset);
+            jmethodID kit = env->GetMethodID(kcls, "iterator", "()Ljava/util/Iterator;");
+            env->DeleteLocalRef(kcls);
+            jobject iter = env->CallObjectMethod(keyset, kit);
+            env->DeleteLocalRef(keyset);
+            if (iter) {
+                jclass ic = env->GetObjectClass(iter);
+                jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
+                jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
+                env->DeleteLocalRef(ic);
+                while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                    JniLocalFrame item_frame(env, 16);
+                    jstring k = (jstring)env->CallObjectMethod(iter, mnx);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+                    if (k) {
+                        jobject v = env->CallObjectMethod(obj, s_bundle_get, k);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); v = nullptr; }
+                        std::string k_str = stratum_jstring_to_str(env, k);
+                        result[nb::str(k_str.c_str())] = stratum_java_to_py(env, v, depth + 1);
+                    }
+                }
+                env->DeleteLocalRef(iter);
+            }
+        }
+        return result;
+    }
+
+    // 9. Non-data Java Object: wrap into typed StratumObject (100% leak-proof)
+    jobject gref = env->NewGlobalRef(obj);
+    int64_t gref_ptr = (int64_t)(uintptr_t)gref;
+    try {
+        nb::object wrap_fn = nb::module_::import_("stratum.core.stratum_object").attr("_wrap_instance");
+        jclass cls = env->GetObjectClass(obj);
+        jclass ccls = g_class_class ? g_class_class : env->FindClass("java/lang/Class");
+        jmethodID mid_getName = ccls ? env->GetMethodID(ccls, "getName", "()Ljava/lang/String;") : nullptr;
+        jstring jname = (mid_getName && cls) ? (jstring)env->CallObjectMethod(cls, mid_getName) : nullptr;
+        std::string class_name = jname ? stratum_jstring_to_str(env, jname) : "java.lang.Object";
+        if (!g_class_class && ccls) env->DeleteLocalRef(ccls);
+        if (cls) env->DeleteLocalRef(cls);
+        return wrap_fn(gref_ptr, class_name.c_str());
+    } catch (nb::python_error& e) {
+        e.restore();
+        PyErr_Clear();
+        env->DeleteGlobalRef(gref);
+        return nb::none();
+    } catch (...) {
+        PyErr_Clear();
+        env->DeleteGlobalRef(gref);
+        return nb::none();
+    }
+}
+
 // Called by a Stage 05.5 Java adapter / dynamic proxy when Android
 // invokes a callback method. Looks up the stored Python callable by key
 // and dispatches into it.

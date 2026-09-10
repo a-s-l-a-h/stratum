@@ -409,37 +409,35 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             }
 
             // ── v9 FIX 3: java.util.List / Collection / Iterable ────────
-            // Built as a real java.util.ArrayList so the callee can use
-            // any List method on it (size(), get(), iterator(), ...).
+            // Built as a real java.util.ArrayList with full recursive element conversion
             case 'M': {
                 if (item.is_none()) {
                     jargs[i].l = nullptr;
-                } else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item) || nb::isinstance<nb::set>(item)) {
-                    jclass alcls = find_class(env, "java/util/ArrayList");
-                    if (!alcls) throw std::runtime_error("Stratum: java/util/ArrayList not found");
-                    jmethodID alctor = env->GetMethodID(alcls, "<init>", "()V");
-                    jmethodID aladd  = env->GetMethodID(alcls, "add", "(Ljava/lang/Object;)Z");
-                    jobject al = env->NewObject(alcls, alctor);
-
-                    nb::list l = stratum_to_list(item);
-                    jsize sz = (jsize)nb::len(l);
-                    for (jsize k = 0; k < sz; ++k) {
-                        auto elem = l[k];
-                        if (elem.is_none()) {
-                            env->CallBooleanMethod(al, aladd, nullptr);
-                        } else if (nb::isinstance<nb::str>(elem)) {
-                            jstring js = stratum_str_to_jstring(env, nb::cast<std::string>(elem));
-                            env->CallBooleanMethod(al, aladd, js);
-                            env->DeleteLocalRef(js);
-                        } else if (nb::hasattr(elem, "_ptr")) {
-                            env->CallBooleanMethod(al, aladd, (jobject)(uintptr_t)nb::cast<int64_t>(elem.attr("_ptr")));
-                        }
-                    }
-                    env->DeleteLocalRef(alcls);
-                    jargs[i].l = al; locals.push_back(al);
                 } else if (nb::hasattr(item, "_ptr")) {
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
-                } else jargs[i].l = nullptr;
+                } else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item) || nb::isinstance<nb::set>(item)) {
+                    jobject al = stratum_py_to_java(env, item);
+                    jargs[i].l = al;
+                    if (al) locals.push_back(al);
+                } else {
+                    jargs[i].l = nullptr;
+                }
+                break;
+            }
+
+            // ── Inbound java.util.Map / HashMap ─────────────────────────
+            case 'N': {
+                if (item.is_none()) {
+                    jargs[i].l = nullptr;
+                } else if (nb::hasattr(item, "_ptr")) {
+                    jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
+                } else if (nb::isinstance<nb::dict>(item)) {
+                    jobject hm = stratum_py_to_java(env, item);
+                    jargs[i].l = hm;
+                    if (hm) locals.push_back(hm);
+                } else {
+                    jargs[i].l = nullptr;
+                }
                 break;
             }
 
@@ -514,14 +512,31 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 if (item.is_none()) {
                     jargs[i].l = nullptr;
                 } else if (nb::hasattr(item, "_ptr")) {
+                    // Wrapped Java objects always have _ptr and are passed directly
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
-                } else if (nb::isinstance<nb::int_>(item)) {
-                    // FIX: Allow integer pointer (e.g. from sf_get_*) to pass as jobject
-                    jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item);
                 } else if (nb::isinstance<nb::str>(item)) {
                     jstring js = stratum_str_to_jstring(env, nb::cast<std::string>(item));
                     jargs[i].l = js;
                     locals.push_back(js);
+                } else if (nb::isinstance<nb::dict>(item) || nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item) || nb::isinstance<nb::set>(item)) {
+                    jobject jo = stratum_py_to_java(env, item);
+                    jargs[i].l = jo;
+                    if (jo) locals.push_back(jo);
+                } else if (nb::isinstance<nb::bool_>(item)) {
+                    // Must precede int_ check (bool subclasses int in Python)
+                    jobject bo = stratum_py_to_java(env, item);
+                    jargs[i].l = bo;
+                    if (bo) locals.push_back(bo);
+                } else if (nb::isinstance<nb::float_>(item)) {
+                    jobject dbl = stratum_py_to_java(env, item);
+                    jargs[i].l = dbl;
+                    if (dbl) locals.push_back(dbl);
+                } else if (nb::isinstance<nb::int_>(item)) {
+                    // 100% Safe Auto-Boxing: All genuine StratumObjects were already caught by hasattr("_ptr") above.
+                    // This is guaranteed to be a Python numeric int, safely boxed without address-space limits.
+                    jobject io = stratum_py_to_java(env, item);
+                    jargs[i].l = io;
+                    if (io) locals.push_back(io);
                 } else {
                     jargs[i].l = nullptr;
                 }

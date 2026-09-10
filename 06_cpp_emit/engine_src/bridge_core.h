@@ -2,6 +2,7 @@
 #pragma once
 #include <jni.h>
 #include <string>
+#include <vector>
 #include <mutex>
 #include <memory>
 #include <unordered_map>
@@ -86,6 +87,10 @@ std::string  stratum_jstring_to_str(JNIEnv* env, jobject jstr_obj);
 // v9.1: List/Collection -> Python list, Map -> Python dict (return-value path)
 nb::list     stratum_collection_to_list(JNIEnv* env, jobject collection);
 nb::dict     stratum_map_to_dict(JNIEnv* env, jobject map);
+
+// Bidirectional Data Bridge (safe recursive serialization between Python and Java)
+jobject      stratum_py_to_java(JNIEnv* env, nb::handle obj, int depth = 0);
+nb::object   stratum_java_to_py(JNIEnv* env, jobject obj, int depth = 0);
 
 // ── v9 FIX 1: RAII local-reference frame ────────────────────────────────
 // Wrap ANY block of JNI code that can create local references (object

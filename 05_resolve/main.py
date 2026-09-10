@@ -146,6 +146,14 @@ def compute_param_tags(params: list) -> str:
         ):
             tags.append("M")
 
+        # ── java.util.Map / HashMap -> real HashMap ─────────────────────────
+        elif java_type in (
+            "java.util.Map", "java.util.HashMap", "java.util.LinkedHashMap",
+            "java.util.concurrent.ConcurrentHashMap", "java.util.SortedMap",
+            "java.util.NavigableMap", "java.util.TreeMap", "java.util.Hashtable",
+        ) or (java_type.startswith("java.util.") and java_type.endswith("Map")) or (p.get("jni_class", "").startswith("java/util/") and p.get("jni_class", "").endswith("Map")):
+            tags.append("N")
+
         # ── Primitive arrays (checked BEFORE the generic array fallback) ────
         elif java_type == "[B" or jni_type == "jbyteArray":
             tags.append("[")
