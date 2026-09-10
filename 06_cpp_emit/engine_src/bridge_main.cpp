@@ -190,9 +190,24 @@ NB_MODULE(_stratum, m) {
         g_lifecycle_cbs[name] = fn;
     });
 
-    m.def("set_log_enabled", [](bool enabled) { g_log_enabled = enabled; });
-    m.def("is_log_enabled",  []() -> bool { return g_log_enabled; });
-    m.def("log_msg", [](const std::string& msg) { LOGD("[Python] %s", msg.c_str()); });
+    // Always exists, never throws, never crashes — even in a build
+    // compiled with STRATUM_LOG_ENABLED=0. In that case it's a no-op
+    // and returns false so callers KNOW it had no effect, instead of
+    // silently pretending logging turned on.
+    m.def("set_log_enabled", [](bool enabled) -> bool {
+        if (!g_log_build_supported) return false;
+        g_log_enabled = enabled;
+        LOGI("Stratum: deep logging %s", enabled ? "ENABLED" : "disabled");
+        return true;
+    });
+    m.def("is_log_enabled",  []() -> bool { return g_log_build_supported && g_log_enabled; });
+    m.def("is_log_build",    []() -> bool { return g_log_build_supported; });
+    m.def("log_msg", [](const std::string& msg) {
+        if (g_log_build_supported && g_log_enabled) {
+            __android_log_print(ANDROID_LOG_INFO, "Stratum", "[Python] %s", msg.c_str());
+        }
+        // else: silent no-op, exactly as spec'd — "not supported in this build"
+    });
 
     m.def("set_content_view", [](int64_t act_ptr, int64_t view_ptr) {
         if (!act_ptr || !view_ptr) throw std::runtime_error("set_content_view: null activity or view");

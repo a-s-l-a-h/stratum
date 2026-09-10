@@ -557,16 +557,23 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
     JNIEnv* env = get_env();                                                        \
     if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");        \
     JniLocalFrame _local_frame(env, 32);                                            \
+    if (class_id >= g_class_count) throw std::runtime_error("Stratum: invalid class_id"); \
     ClassMeta& cls = g_classes[class_id];                                           \
     if (!cls.resolved) resolve_class_slots(env, class_id);                          \
+    if (!cls.method_ids || slot >= cls.method_count) throw std::runtime_error("Stratum: invalid method slot"); \
     jmethodID mid = cls.method_ids[slot];                                           \
     if (!mid) throw std::runtime_error("Stratum: Method unavailable on device API"); \
     if (!cls.methods[slot].is_static && !ptr) {                                     \
         throw std::runtime_error("Stratum: Attempted to call a method on a null Java object"); \
     }                                                                               \
-    jvalue jargs[32] = {};  /* v9 FIX 4: zero-init, always bounded to 32 */          \
+    LOGT(">> CALL [%s#%s] argc=%u ptr=0x%llx static=%d",                            \
+         get_str(cls.jni_name_offset), get_str(cls.methods[slot].name_offset),      \
+         (unsigned)nb::len(args), (unsigned long long)ptr, (int)cls.methods[slot].is_static); \
+    jvalue jargs[32] = {};                                                          \
     std::vector<jobject> locals;                                                    \
     pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals, ptr);
+
+#define LOGT_RET(fmt, val) LOGT("<< RET  [%s#%s] " fmt, get_str(cls.jni_name_offset), get_str(cls.methods[slot].name_offset), val)
 
 #define CLEANUP_AND_CHECK() stratum_check_java_exc(env);
 
@@ -582,6 +589,7 @@ void call_v(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
         env->CallVoidMethodA((jobject)(uintptr_t)ptr, mid, jargs);
     }
     CLEANUP_AND_CHECK()
+    LOGT_RET("%s", "void");
 }
 
 bool call_z(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
@@ -595,6 +603,7 @@ bool call_z(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
         res = env->CallBooleanMethodA((jobject)(uintptr_t)ptr, mid, jargs);
     }
     CLEANUP_AND_CHECK()
+    LOGT_RET("bool=%s", res != JNI_FALSE ? "true" : "false");
     return res != JNI_FALSE;
 }
 
@@ -621,6 +630,7 @@ int64_t call_i(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
                                 : env->CallIntMethodA(target, mid, jargs));
     }
     CLEANUP_AND_CHECK()
+    LOGT_RET("int=%lld", (long long)res);
     return res;
 }
 
@@ -635,6 +645,7 @@ int64_t call_j(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
         res = env->CallLongMethodA((jobject)(uintptr_t)ptr, mid, jargs);
     }
     CLEANUP_AND_CHECK()
+    LOGT_RET("long=%lld", (long long)res);
     return res;
 }
 
@@ -661,6 +672,7 @@ double call_d(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
         }
     }
     CLEANUP_AND_CHECK()
+    LOGT_RET("double=%f", res);
     return res;
 }
 
@@ -675,7 +687,9 @@ std::string call_str(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args arg
         res = env->CallObjectMethodA((jobject)(uintptr_t)ptr, mid, jargs);
     }
     CLEANUP_AND_CHECK()
-    return stratum_jstring_to_str(env, res); // frees its own local ref internally
+    std::string s_res = stratum_jstring_to_str(env, res);
+    LOGT_RET("str=%.80s", s_res.c_str());
+    return s_res;
 }
 
 int64_t call_o(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
@@ -689,10 +703,15 @@ int64_t call_o(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {
         res = env->CallObjectMethodA((jobject)(uintptr_t)ptr, mid, jargs);
     }
     CLEANUP_AND_CHECK()
-    if (!res) return 0;
+    if (!res) {
+        LOGT_RET("obj=%s", "null");
+        return 0;
+    }
     jobject gref = env->NewGlobalRef(res);
     env->DeleteLocalRef(res);
-    return (int64_t)(uintptr_t)gref;
+    int64_t out_ptr = (int64_t)(uintptr_t)gref;
+    LOGT_RET("obj=0x%llx", (unsigned long long)out_ptr);
+    return out_ptr;
 }
 
 nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args) {

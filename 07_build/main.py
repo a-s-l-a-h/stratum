@@ -149,8 +149,10 @@ def main():
     parser.add_argument("--abi", default="arm64-v8a", choices=["arm64-v8a", "armeabi-v7a", "x86_64", "x86"])
     parser.add_argument("--chaquopy", default="3.12.0-0")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--log-level", type=int, default=0, choices=[0, 1, 2],
-                         help="0=production (stripped), 1=basic, 2=deep/trace. Default: 0")
+    parser.add_argument("--log", dest="log_enabled", action="store_true", default=True,
+                         help="Build WITH deep trace logging compiled in (default).")
+    parser.add_argument("--no-log", dest="log_enabled", action="store_false",
+                         help="Build WITHOUT logging — fully stripped, zero-cost, for production/release.")
     args = parser.parse_args()
 
     print_header("STRATUM PIPELINE — STAGE 07 (BUILD) v9")
@@ -212,7 +214,7 @@ def main():
         "-G", "Ninja",
         f"-DCMAKE_MAKE_PROGRAM={ninja_exe}",
         f"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES={init_file.resolve().as_posix()}",
-        f"-DSTRATUM_LOG_LEVEL={args.log_level}",
+        f"-DSTRATUM_LOG_ENABLED={1 if args.log_enabled else 0}",
     ]
     subprocess.run(cfg_cmd, check=True)
 

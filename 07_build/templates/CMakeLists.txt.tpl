@@ -8,8 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 1 = basic logging, 2 = deep/trace logging. Passed in by 07_build/main.py
 # via --log-level. Never edit this file to change the level — use the
 # command-line flag instead, so the value stays in one place.
-if(NOT DEFINED STRATUM_LOG_LEVEL)
-    set(STRATUM_LOG_LEVEL 0)
+if(NOT DEFINED STRATUM_LOG_ENABLED)
+    set(STRATUM_LOG_ENABLED 1)
 endif()
 
 set(STRATUM_PYTHON_VERSION "{{PYTHON_VERSION}}")
@@ -36,7 +36,7 @@ target_include_directories(_stratum PRIVATE
     "${STRATUM_PYTHON_INCLUDE}"
 )
 
-target_compile_definitions(_stratum PRIVATE STRATUM_LOG_LEVEL=${STRATUM_LOG_LEVEL})
+target_compile_definitions(_stratum PRIVATE STRATUM_LOG_ENABLED=${STRATUM_LOG_ENABLED})
 
 target_compile_options(_stratum PRIVATE
     -O2

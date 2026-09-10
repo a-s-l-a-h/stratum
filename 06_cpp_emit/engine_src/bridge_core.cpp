@@ -2,7 +2,12 @@
 #include "bridge_core.h"
 #include <pthread.h>
 
-bool g_log_enabled = true;  // runtime toggle; only has effect if STRATUM_LOG_LEVEL >= 1
+bool g_log_enabled = true;  // default ON, per spec — deep trace from first launch
+#if STRATUM_LOG_ENABLED
+const bool g_log_build_supported = true;
+#else
+const bool g_log_build_supported = false;
+#endif
 
 JavaVM*   g_jvm = nullptr;
 jobject   g_activity = nullptr;
@@ -903,6 +908,7 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
     // Only touch the callable's refcount now that the GIL is actually held.
     nb::callable fn = *fn_ptr;
     JniLocalFrame frame(env, 32);
+    LOGT(">> JAVA->PY DISPATCH key='%s' argc=%d", routed_key.c_str(), args ? env->GetArrayLength(args) : 0);
 
     // Cache primitive wrapper classes once. Without unboxing, a Java
     // caller passing e.g. onProgressChanged(SeekBar, int, boolean) hands
@@ -1001,7 +1007,10 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
         return stratum_str_to_jstring(env, nb::cast<std::string>(py_result));
     }
     if (nb::hasattr(py_result, "_ptr")) {
-        return (jobject)(uintptr_t)nb::cast<int64_t>(py_result.attr("_ptr"));
+        jobject rv = (jobject)(uintptr_t)nb::cast<int64_t>(py_result.attr("_ptr"));
+        LOGT("<< PY->JAVA DISPATCH key='%s' returned object ptr=%p", routed_key.c_str(), (void*)rv);
+        return rv;
     }
+    LOGT("<< PY->JAVA DISPATCH key='%s' returned null/void", routed_key.c_str());
     return nullptr;
 }

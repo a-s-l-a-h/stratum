@@ -17,27 +17,41 @@ namespace nb = nanobind;
 //   2 = deep/trace: + every argument value, every return value.
 // g_log_enabled is a RUNTIME toggle on top (stratum.set_log_enabled), so
 // a level-1/2 build can still ship quiet by default.
-#ifndef STRATUM_LOG_LEVEL
-#define STRATUM_LOG_LEVEL 0
+// STRATUM_LOG_ENABLED: one switch, not three levels.
+//   1 (default) = full deep trace compiled IN: every Python->C++->Java
+//                  call, every argument, every return value, every
+//                  Java->C++->Python callback dispatch. Toggle at
+//                  runtime with stratum.set_log_enabled(bool).
+//   0            = fully stripped at compile time. LOGD/LOGV/LOGT
+//                  become ((void)0) — zero cost, nothing left in the
+//                  binary. set_log_enabled() still EXISTS (so calling
+//                  it never crashes) but is a documented no-op.
+#ifndef STRATUM_LOG_ENABLED
+#define STRATUM_LOG_ENABLED 1
 #endif
 
 extern bool g_log_enabled;
+// True only if this .so was actually compiled with logging support.
+// Exposed to Python so set_log_enabled() can tell the caller it had
+// no effect, instead of pretending it worked.
+extern const bool g_log_build_supported;
 
 #include <android/log.h>
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Stratum", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "Stratum", __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "Stratum", __VA_ARGS__)
 
-#if STRATUM_LOG_LEVEL >= 1
-  #define LOGD(...) do { if (g_log_enabled) __android_log_print(ANDROID_LOG_DEBUG, "Stratum", __VA_ARGS__); } while(0)
+#if STRATUM_LOG_ENABLED
+  #define LOGD(...) do { if (g_log_enabled) __android_log_print(ANDROID_LOG_DEBUG,   "Stratum", __VA_ARGS__); } while(0)
+  #define LOGV(...) do { if (g_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__); } while(0)
+  // LOGT = "trace" — for the deep data-marshalling dumps (every arg
+  // value, every return value crossing the bridge). Separate macro so
+  // it reads clearly at call sites; same runtime gate as LOGV.
+  #define LOGT(...) do { if (g_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "StratumTrace", __VA_ARGS__); } while(0)
 #else
   #define LOGD(...) ((void)0)
-#endif
-
-#if STRATUM_LOG_LEVEL >= 2
-  #define LOGV(...) do { if (g_log_enabled) __android_log_print(ANDROID_LOG_VERBOSE, "Stratum", __VA_ARGS__); } while(0)
-#else
   #define LOGV(...) ((void)0)
+  #define LOGT(...) ((void)0)
 #endif
 
 // ── Globals ──────────────────────────────────────────────────────────────
