@@ -1,4 +1,4 @@
-## happen a bigger architecture change ( above v0.3_1 ( not in v0.3_1))
+## happening a bigger architecture change ( above v0.3_1 ( not in v0.3_1))
 ## 🚀 Architecture Evolution: The Universal Data-Driven Engine 
 
 Stratum has transitioned from a brute-force static C++ code-generator (v0.3_1 and old ) to a **high-performance, data-driven JNI virtual engine (after v0.3_1 )**. 
@@ -23,6 +23,51 @@ Instead of generating thousands of bloated, redundant C++ wrapper classes and Na
 | **C++ Build Time** | 20–60+ minutes (High RAM/OOM risk) | **< 10 seconds** |
 | **Binary Metadata Size** | Tens of megabytes | **~2.0 MB compressed pool** |
 | **Method Resolution** | Static link-time binding | **Lazy $O(1)$ JNI slot cache** |
+
+
+
+# Run commands . ((for faster refer))
+
+# One-time / rarely re-run
+python 00_setup/main.py --ndk-path third_party/ndk25/android-ndk-r25c --jar-path third_party/android-35.jar --api-version 35 --ndk-api 24 --chaquopy-version "3.10.13-0" --output 00_setup/output/
+python 01_extract/main.py --setup 00_setup/output/setup_report.json --output 01_extract/output/
+python 02_inspect/main.py --input 01_extract/output/ --output 02_inspect/output/
+# -> edit 02_inspect/targets.json
+
+python 03_javap/main.py --input 01_extract/output/ --targets 02_inspect/targets.json --setup 00_setup/output/setup_report.json --output 03_javap/output/
+python 04_parse/main.py --input 03_javap/output/ --output 04_parse/output/
+
+# ── Stage 05 PASS 1 ── (edit 05_resolve/targets.json before this)
+python 05_resolve/main.py --input 04_parse/output/ --output 05_resolve/output/
+
+# ── ONLY if you need callbacks/abstract classes (skip these 2 if not) ──
+# edit 05_5_abstract/targets.json first
+python 05_5_abstract/main.py --mode on --input 05_resolve/output/ --output 05_5_abstract/output/ --output-java 05_5_abstract/output_java/
+# -> copy 05_5_abstract/output_java/com/stratum/adapters/*.java into Android Studio: app/src/main/java/com/stratum/adapters/
+
+# ── Stage 05 PASS 2 ── (this is the run that actually feeds 06/08)
+python 05_resolve/main.py --input 05_5_abstract/output/patched/ --output 05_resolve/output_patched/
+
+# If you skipped 05.5, just point 06/08 at 05_resolve/output/ instead of output_patched/.
+
+python 06_cpp_emit/main.py --input 05_resolve/output_patched --output 06_cpp_emit/output
+python 07_build/main.py --cpp 06_cpp_emit/output --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --chaquopy 3.10.13-0 --output 07_build/output --log-level 2
+python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output
+python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --chaquopy 3.10.13-0
+
+
+
+
+
+
+
+
+
+
+
+
+
+---------------------------------------------------
 
 # Stratum 
 
