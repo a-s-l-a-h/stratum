@@ -288,7 +288,14 @@ def index_and_save(selected_fqns: list, registry: dict, output_dir: Path, closur
         fields = data.get("fields", [])
         for f_slot, f in enumerate(fields):
             f["slot"] = f_slot
-            f["ret_type_id"] = RET_TYPE_MAP.get(f.get("jni_type", "jobject"), 10)
+            f_sig = f.get("jni_signature", f.get("jni_type", ""))
+            # [Patch 15] Array-typed fields (Build.SUPPORTED_ABIS, etc.) get
+            # their own ret_type_id so Stage 06/08 route them through
+            # field_get_arr instead of the generic object getter.
+            if f_sig.startswith("["):
+                f["ret_type_id"] = 11
+            else:
+                f["ret_type_id"] = RET_TYPE_MAP.get(f.get("jni_type", "jobject"), 10)
             f["safe_name"] = sanitize_id(f.get("name", "unknown"))
         data["fields"] = fields
         data["field_count"] = len(fields)

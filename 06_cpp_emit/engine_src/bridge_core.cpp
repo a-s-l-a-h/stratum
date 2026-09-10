@@ -259,12 +259,17 @@ nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
     jmethodID mhn = env->GetMethodID(ic, "hasNext", "()Z");
     jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
     env->DeleteLocalRef(ic);
-    while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+    // [Patch 14] Resolve getKey/getValue once via the Map.Entry interface
+    // instead of once-per-entry via GetObjectClass — method IDs obtained
+    // from an interface class remain valid for virtual calls on any
+    // implementing instance, so this is safe regardless of the concrete
+    // entry class.
+    jclass entry_iface = find_class(env, "java/util/Map$Entry");
+    jmethodID mkey = entry_iface ? env->GetMethodID(entry_iface, "getKey", "()Ljava/lang/Object;") : nullptr;
+    jmethodID mval = entry_iface ? env->GetMethodID(entry_iface, "getValue", "()Ljava/lang/Object;") : nullptr;
+    if (entry_iface) env->DeleteLocalRef(entry_iface);
+    while (mhn && mnx && mkey && mval && env->CallBooleanMethod(iter, mhn)) {
         jobject entry = env->CallObjectMethod(iter, mnx);
-        jclass ec = env->GetObjectClass(entry);
-        jmethodID mkey = env->GetMethodID(ec, "getKey", "()Ljava/lang/Object;");
-        jmethodID mval = env->GetMethodID(ec, "getValue", "()Ljava/lang/Object;");
-        env->DeleteLocalRef(ec);
         jobject ek = env->CallObjectMethod(entry, mkey);
         jobject ev = env->CallObjectMethod(entry, mval);
         env->DeleteLocalRef(entry);

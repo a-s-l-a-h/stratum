@@ -25,6 +25,7 @@ int64_t field_get_j(int64_t, uint32_t, uint32_t);
 double field_get_d(int64_t, uint32_t, uint32_t);
 std::string field_get_str(int64_t, uint32_t, uint32_t);
 int64_t field_get_o(int64_t, uint32_t, uint32_t);
+nb::object field_get_arr(int64_t, uint32_t, uint32_t);
 void field_set_i(int64_t, uint32_t, uint32_t, int64_t);
 void field_set_z(int64_t, uint32_t, uint32_t, bool);
 void field_set_j(int64_t, uint32_t, uint32_t, int64_t);
@@ -90,6 +91,27 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     return JNI_VERSION_1_6;
 }
 
+// [Patch 13] Free cached global refs if the library is ever unloaded/
+// reloaded. Rare on Android, but the app-scoped class cache (g_classes[*]
+// .class_ref) is intentionally left alone here — g_resolve_mutex/
+// resolve_class_slots owns that lifecycle, not JNI_OnUnload.
+extern "C" JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void*) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return;
+    auto del = [&](jobject& r) { if (r) { env->DeleteGlobalRef(r); r = nullptr; } };
+    del(reinterpret_cast<jobject&>(g_jstring_class));
+    del(reinterpret_cast<jobject&>(g_proxy_class));
+    del(reinterpret_cast<jobject&>(g_class_class));
+    del(reinterpret_cast<jobject&>(g_object_class));
+    del(reinterpret_cast<jobject&>(g_stratum_handler_class));
+    del(g_app_class_loader);
+    {
+        std::lock_guard<std::mutex> lk(g_activity_mutex);
+        del(g_activity);
+    }
+    LOGI("Stratum engine unloaded, global refs released.");
+}
+
 NB_MODULE(_stratum, m) {
     m.def("call_v", &call_v);
     m.def("call_z", &call_z);
@@ -111,6 +133,7 @@ NB_MODULE(_stratum, m) {
     m.def("field_get_d", &field_get_d);
     m.def("field_get_str", &field_get_str);
     m.def("field_get_o", &field_get_o);
+    m.def("field_get_arr", &field_get_arr);
     m.def("field_set_i", &field_set_i);
     m.def("field_set_z", &field_set_z);
     m.def("field_set_j", &field_set_j);

@@ -22,6 +22,40 @@ static thread_local std::vector<std::string>* t_ctor_callback_keys = nullptr;
 static std::recursive_mutex g_resolve_mutex;
 static inline const char* get_str(uint32_t off) { return &g_str_pool[off]; }
 
+// [Patch 12] Accept list OR tuple for every array-typed argument.
+// PySequence_List handles both uniformly without needing separate code
+// paths for nb::list vs nb::tuple.
+static inline nb::list stratum_to_list(nb::handle item) {
+    PyObject* seq = PySequence_List(item.ptr());
+    if (!seq) { PyErr_Clear(); return nb::list(); }
+    return nb::steal<nb::list>(seq);
+}
+
+// [Patch 12] Accept bytes, bytearray, or memoryview for byte[] params via
+// the buffer protocol (covers bytearray/memoryview which bytes-only
+// isinstance checks silently dropped to null before).
+static inline bool stratum_get_buffer(nb::handle item, const char** out_ptr,
+                                       Py_ssize_t* out_len, Py_buffer* view,
+                                       bool* needs_release) {
+    *needs_release = false;
+    if (nb::isinstance<nb::bytes>(item)) {
+        nb::bytes b = nb::cast<nb::bytes>(item);
+        *out_ptr = b.c_str();
+        *out_len = (Py_ssize_t)b.size();
+        return true;
+    }
+    if (PyObject_CheckBuffer(item.ptr())) {
+        if (PyObject_GetBuffer(item.ptr(), view, PyBUF_SIMPLE) == 0) {
+            *out_ptr = (const char*)view->buf;
+            *out_len = view->len;
+            *needs_release = true;
+            return true;
+        }
+        PyErr_Clear();
+    }
+    return false;
+}
+
 // Resolves ALL method/field IDs for one class, exactly once, the first
 // time any of its methods/fields is touched. This is what makes
 // class-to-class dependencies a non-issue: nothing is pre-linked,
@@ -89,14 +123,24 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                                    int64_t caller_ptr = 0) {
     size_t n = nb::len(args);
 
-    // Automatic Java varargs packing for Object... / String... (tag 'A' or 'T')
+    // Automatic Java varargs packing. Was 'A'/'T' only (Object.../
+    // String...); [Patch 16] extends the same heuristic to primitive
+    // vararg arrays ([I, [F, [J, [D, [Z, [C, [S) so calls like
+    // ValueAnimator.ofInt(0, 100) don't throw an argument-count mismatch.
     nb::list auto_packed_args;
     bool is_varargs = false;
     if (mm.param_count > 0) {
         char last_tag = tags[mm.param_count - 1];
-        if (last_tag == 'A' || last_tag == 'T') {
-            if (n != (size_t)mm.param_count ||
-                (n > 0 && !nb::isinstance<nb::list>(args[n - 1]) && !args[n - 1].is_none())) {
+        static const std::string kVarargsArrayTags = "]qfdbch";
+        bool last_is_array_tag = (last_tag == 'A' || last_tag == 'T' ||
+                                   kVarargsArrayTags.find(last_tag) != std::string::npos);
+        if (last_is_array_tag) {
+            bool last_arg_already_array = (n > 0) &&
+                (nb::isinstance<nb::list>(args[n - 1]) ||
+                 nb::isinstance<nb::tuple>(args[n - 1]) ||
+                 nb::isinstance<nb::bytes>(args[n - 1]) ||
+                 args[n - 1].is_none());
+            if (n != (size_t)mm.param_count || (n > 0 && !last_arg_already_array)) {
                 is_varargs = true;
             }
         }
@@ -169,22 +213,28 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: byte[] from Python bytes/bytearray ────────────
             case '[': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::bytes>(item)) {
-                    nb::bytes b = nb::cast<nb::bytes>(item);
-                    jbyteArray ja = env->NewByteArray((jsize)b.size());
-                    if (b.size() > 0) env->SetByteArrayRegion(ja, 0, (jsize)b.size(), reinterpret_cast<const jbyte*>(b.c_str()));
-                    jargs[i].l = ja; locals.push_back(ja);
-                } else if (nb::hasattr(item, "_ptr")) {
+                else if (nb::hasattr(item, "_ptr")) {
                     jargs[i].l = (jobject)(uintptr_t)nb::cast<int64_t>(item.attr("_ptr"));
-                } else jargs[i].l = nullptr;
+                } else {
+                    Py_buffer view{}; bool needs_release = false;
+                    const char* data = nullptr; Py_ssize_t len = 0;
+                    if (stratum_get_buffer(item, &data, &len, &view, &needs_release)) {
+                        jbyteArray ja = env->NewByteArray((jsize)len);
+                        if (len > 0) env->SetByteArrayRegion(ja, 0, (jsize)len, reinterpret_cast<const jbyte*>(data));
+                        jargs[i].l = ja; locals.push_back(ja);
+                        if (needs_release) PyBuffer_Release(&view);
+                    } else {
+                        jargs[i].l = nullptr;
+                    }
+                }
                 break;
             }
 
             // ── v9 FIX 3: int[] from Python list[int] ───────────────────
             case ']': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jintArray ja = env->NewIntArray(sz);
                     std::vector<jint> buf(sz);
@@ -200,8 +250,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: long[] ──────────────────────────────────────
             case 'q': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jlongArray ja = env->NewLongArray(sz);
                     std::vector<jlong> buf(sz);
@@ -217,8 +267,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: float[] ─────────────────────────────────────
             case 'f': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jfloatArray ja = env->NewFloatArray(sz);
                     std::vector<jfloat> buf(sz);
@@ -234,8 +284,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: double[] ────────────────────────────────────
             case 'd': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jdoubleArray ja = env->NewDoubleArray(sz);
                     std::vector<jdouble> buf(sz);
@@ -251,8 +301,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: boolean[] ───────────────────────────────────
             case 'b': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jbooleanArray ja = env->NewBooleanArray(sz);
                     std::vector<jboolean> buf(sz);
@@ -268,8 +318,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: char[] ──────────────────────────────────────
             case 'c': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jcharArray ja = env->NewCharArray(sz);
                     std::vector<jchar> buf(sz);
@@ -292,8 +342,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: short[] ─────────────────────────────────────
             case 'h': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jshortArray ja = env->NewShortArray(sz);
                     std::vector<jshort> buf(sz);
@@ -309,8 +359,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: String[] ────────────────────────────────────
             case 'T': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jobjectArray ja = env->NewObjectArray(sz, g_jstring_class, nullptr);
                     for (jsize k = 0; k < sz; ++k) {
@@ -335,8 +385,8 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             // ── v9 FIX 3: generic Object[] (Surface[], Object[], etc.) ──
             case 'A': {
                 if (item.is_none()) jargs[i].l = nullptr;
-                else if (nb::isinstance<nb::list>(item)) {
-                    nb::list l = nb::cast<nb::list>(item);
+                else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jobjectArray ja = env->NewObjectArray(sz, g_object_class, nullptr);
                     for (jsize k = 0; k < sz; ++k) {
@@ -364,14 +414,14 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
             case 'M': {
                 if (item.is_none()) {
                     jargs[i].l = nullptr;
-                } else if (nb::isinstance<nb::list>(item)) {
+                } else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item) || nb::isinstance<nb::set>(item)) {
                     jclass alcls = find_class(env, "java/util/ArrayList");
                     if (!alcls) throw std::runtime_error("Stratum: java/util/ArrayList not found");
                     jmethodID alctor = env->GetMethodID(alcls, "<init>", "()V");
                     jmethodID aladd  = env->GetMethodID(alcls, "add", "(Ljava/lang/Object;)Z");
                     jobject al = env->NewObject(alcls, alctor);
 
-                    nb::list l = nb::cast<nb::list>(item);
+                    nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     for (jsize k = 0; k < sz; ++k) {
                         auto elem = l[k];
@@ -1000,6 +1050,153 @@ int64_t field_get_o(int64_t ptr, uint32_t class_id, uint32_t slot) {
     jobject gref = env->NewGlobalRef(res);
     env->DeleteLocalRef(res);
     return (int64_t)(uintptr_t)gref;
+}
+
+// [Patch 15] Array-typed field getter — mirrors call_arr's array-type
+// dispatch but reads a field instead of invoking a method.
+nb::object field_get_arr(int64_t ptr, uint32_t class_id, uint32_t slot) {
+    JNIEnv* env = get_env();
+    if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+    JniLocalFrame _local_frame(env, 8);
+    ensure_class_resolved(env, class_id);
+    ClassMeta& cls = g_classes[class_id];
+    jfieldID fid = cls.field_ids[slot];
+    if (!fid) throw std::runtime_error("Stratum: field unavailable on this device API level");
+    if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
+    jobject res = cls.fields[slot].is_static
+        ? env->GetStaticObjectField(cls.class_ref, fid)
+        : env->GetObjectField((jobject)(uintptr_t)ptr, fid);
+    stratum_check_java_exc(env);
+    if (!res) return nb::list();
+
+    static jclass s_byte_arr_cls = nullptr, s_int_arr_cls = nullptr,
+                  s_long_arr_cls = nullptr, s_flt_arr_cls = nullptr,
+                  s_dbl_arr_cls  = nullptr, s_bool_arr_cls = nullptr,
+                  s_char_arr_cls = nullptr, s_short_arr_cls = nullptr;
+    static std::once_flag s_field_arr_flag;
+    std::call_once(s_field_arr_flag, [&]() {
+        auto get_arr_cls = [&](const char* sig) {
+            jclass c = env->FindClass(sig);
+            jclass g = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            return g;
+        };
+        s_byte_arr_cls  = get_arr_cls("[B");
+        s_int_arr_cls   = get_arr_cls("[I");
+        s_long_arr_cls  = get_arr_cls("[J");
+        s_flt_arr_cls   = get_arr_cls("[F");
+        s_dbl_arr_cls   = get_arr_cls("[D");
+        s_bool_arr_cls  = get_arr_cls("[Z");
+        s_char_arr_cls  = get_arr_cls("[C");
+        s_short_arr_cls = get_arr_cls("[S");
+    });
+
+    if (env->IsInstanceOf(res, s_byte_arr_cls)) {
+        jbyteArray ba = (jbyteArray)res;
+        jsize len = env->GetArrayLength(ba);
+        jbyte* buf = env->GetByteArrayElements(ba, nullptr);
+        nb::bytes out(reinterpret_cast<const char*>(buf), (size_t)len);
+        env->ReleaseByteArrayElements(ba, buf, JNI_ABORT);
+        env->DeleteLocalRef(res);
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_int_arr_cls)) {
+        jintArray ia = (jintArray)res;
+        jsize len = env->GetArrayLength(ia);
+        std::vector<jint> buf(len);
+        if (len > 0) env->GetIntArrayRegion(ia, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_flt_arr_cls)) {
+        jfloatArray fa = (jfloatArray)res;
+        jsize len = env->GetArrayLength(fa);
+        std::vector<jfloat> buf(len);
+        if (len > 0) env->GetFloatArrayRegion(fa, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::float_((double)buf[i]));
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_long_arr_cls)) {
+        jlongArray ja = (jlongArray)res;
+        jsize len = env->GetArrayLength(ja);
+        std::vector<jlong> buf(len);
+        if (len > 0) env->GetLongArrayRegion(ja, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_dbl_arr_cls)) {
+        jdoubleArray da = (jdoubleArray)res;
+        jsize len = env->GetArrayLength(da);
+        std::vector<jdouble> buf(len);
+        if (len > 0) env->GetDoubleArrayRegion(da, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::float_(buf[i]));
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_bool_arr_cls)) {
+        jbooleanArray za = (jbooleanArray)res;
+        jsize len = env->GetArrayLength(za);
+        std::vector<jboolean> buf(len);
+        if (len > 0) env->GetBooleanArrayRegion(za, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::bool_(buf[i] != JNI_FALSE));
+        return out;
+    }
+    if (env->IsInstanceOf(res, s_char_arr_cls)) {
+        jcharArray ca = (jcharArray)res;
+        jsize len = env->GetArrayLength(ca);
+        std::vector<jchar> buf(len);
+        if (len > 0) env->GetCharArrayRegion(ca, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        std::string utf8;
+        for (jsize i = 0; i < len; ) {
+            uint32_t cp; uint16_t c1 = (uint16_t)buf[i++];
+            if (c1 >= 0xD800 && c1 <= 0xDBFF && i < len) {
+                uint16_t c2 = (uint16_t)buf[i];
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) { cp = 0x10000u + (((uint32_t)(c1 - 0xD800u)) << 10) + (uint32_t)(c2 - 0xDC00u); ++i; }
+                else cp = c1;
+            } else cp = c1;
+            if (cp < 0x80) utf8 += (char)cp;
+            else if (cp < 0x800) { utf8 += (char)(0xC0 | (cp >> 6)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { utf8 += (char)(0xE0 | (cp >> 12)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+            else { utf8 += (char)(0xF0 | (cp >> 18)); utf8 += (char)(0x80 | ((cp >> 12) & 0x3F)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+        }
+        return nb::str(utf8.data(), utf8.size());
+    }
+    if (env->IsInstanceOf(res, s_short_arr_cls)) {
+        jshortArray sa = (jshortArray)res;
+        jsize len = env->GetArrayLength(sa);
+        std::vector<jshort> buf(len);
+        if (len > 0) env->GetShortArrayRegion(sa, 0, len, buf.data());
+        env->DeleteLocalRef(res);
+        nb::list out;
+        for (jsize i = 0; i < len; ++i) out.append(nb::int_((int64_t)buf[i]));
+        return out;
+    }
+
+    nb::list py_list;
+    jsize len = env->GetArrayLength((jarray)res);
+    for (jsize i = 0; i < len; ++i) {
+        jobject elem = env->GetObjectArrayElement((jobjectArray)res, i);
+        if (!elem) { py_list.append(nb::none()); continue; }
+        if (g_jstring_class && env->IsInstanceOf(elem, g_jstring_class)) {
+            py_list.append(nb::str(stratum_jstring_to_str(env, elem).c_str()));
+        } else {
+            jobject gref = env->NewGlobalRef(elem);
+            env->DeleteLocalRef(elem);
+            py_list.append(nb::cast((int64_t)(uintptr_t)gref));
+        }
+    }
+    env->DeleteLocalRef(res);
+    return py_list;
 }
 
 // Setter for the common case (int-family fields). Most real SDK usage is

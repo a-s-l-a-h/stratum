@@ -100,6 +100,7 @@ FIELD_GET_DISPATCH = {
     4: "field_get_i", 5: "field_get_i", 6: "field_get_j",
     7: "field_get_d", 8: "field_get_d",
     9: "field_get_str", 10: "field_get_o",
+    11: "field_get_arr",  # [Patch 15]
 }
 FIELD_SET_DISPATCH = {
     1: "field_set_z", 2: "field_set_i", 3: "field_set_i",
@@ -287,6 +288,8 @@ def build_field_accessors(fields: list, class_id: int) -> list:
                 lines.append(f"        _ptr = _core.{fget}({target}, {class_id}, {fslot})")
                 lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
             else:
+                # field_get_arr (and every scalar getter) already returns
+                # a plain Python value — list/bytes/str/int/etc.
                 lines.append(f"        return _core.{fget}({target}, {class_id}, {fslot})")
         else:
             lines.append(f"    def {prefix}_get_{fname}(self):")
