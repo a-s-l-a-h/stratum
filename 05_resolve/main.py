@@ -131,7 +131,19 @@ def compute_param_tags(params: list) -> str:
             tags.append("a")
 
         elif conv == "callable_to_proxy" or p.get("needs_proxy", False):
-            tags.append("p")
+            # v9.1 FIX: 04_parse flags ANY class ending in "Listener/
+            # Callback/Observer/Handler/Runnable" as proxy-needing, but
+            # java.lang.reflect.Proxy can ONLY implement INTERFACES.
+            # android.os.Handler (and any abstract *Handler subclass)
+            # is a concrete class -> Proxy.newProxyInstance() throws
+            # IllegalArgumentException at runtime the instant this
+            # parameter is used. If Stage 05.5 already generated a
+            # concrete adapter for this type, prefer that ('a') over a
+            # doomed dynamic proxy ('p').
+            if p.get("needs_adapter", False) or p.get("conversion") == "abstract_adapter":
+                tags.append("a")
+            else:
+                tags.append("p")
 
         elif conv in ("string_in", "string_out") or java_type in (
             "java.lang.String", "java.lang.CharSequence",
@@ -237,6 +249,9 @@ def index_and_save(selected_fqns: list, registry: dict, output_dir: Path, closur
     total_methods = 0
     total_fields = 0
 
+    # Build fast lookup map from FQN to assigned class_id
+    fqn_to_class_id = {fqn: cid for cid, fqn in enumerate(selected_fqns)}
+
     for class_id, fqn in enumerate(selected_fqns):
         data = registry[fqn]
         data["class_id"] = class_id
@@ -257,6 +272,13 @@ def index_and_save(selected_fqns: list, registry: dict, output_dir: Path, closur
         for slot, m in enumerate(ordered):
             m["slot"] = slot
             m["param_tags"] = compute_param_tags(m.get("params", []))
+
+            # Precompute target class_id for overload polymorphism resolution
+            for p in m.get("params", []):
+                jt = p.get("java_type", "")
+                if jt in fqn_to_class_id:
+                    p["_target_class_id"] = fqn_to_class_id[jt]
+
             ret_fqn = m.get("return_java_type", "")
             if m.get("return_is_array", False):
                 m["ret_type_id"] = 11

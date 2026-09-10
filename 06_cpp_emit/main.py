@@ -175,7 +175,7 @@ def emit_metadata_table(classes: list, pool: StringPool) -> tuple:
         m_ptr = f"g_methods_cls_{cid}" if cls.get("method_count", 0) else "nullptr"
         f_ptr = f"g_fields_cls_{cid}" if cls.get("field_count", 0) else "nullptr"
         cpp.append(
-            "    {%d, %d, %d, %s, %s, nullptr, nullptr, nullptr, false}," % (
+            "    {%d, %d, %d, %s, %s, nullptr, nullptr, nullptr}," % (
                 pool.get_offset(cls.get("jni_name", "")),
                 cls.get("method_count", 0),
                 cls.get("field_count", 0),
@@ -229,6 +229,7 @@ def emit_metadata_table(classes: list, pool: StringPool) -> tuple:
         "// One entry per Java class. class_ref/method_ids/field_ids start",
         "// null and `resolved` starts false — populated ON FIRST USE by",
         "// resolve_class_slots() in stratum_engine.cpp, never eagerly.",
+        "#include <atomic>",
         "struct ClassMeta {",
         "    uint32_t          jni_name_offset;",
         "    uint16_t          method_count;",
@@ -238,7 +239,7 @@ def emit_metadata_table(classes: list, pool: StringPool) -> tuple:
         "    jclass            class_ref;",
         "    jmethodID*        method_ids;",
         "    jfieldID*         field_ids;",
-        "    bool              resolved;",
+        "    std::atomic<bool> resolved{false};",
         "};",
         "",
         f"extern const char g_str_pool[{len(pool.pool)}];",

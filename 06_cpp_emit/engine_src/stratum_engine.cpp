@@ -65,7 +65,7 @@ static void resolve_class_slots(JNIEnv* env, uint32_t class_id) {
     if (class_id >= g_class_count) throw std::runtime_error("Stratum: class_id out of range");
     std::lock_guard<std::recursive_mutex> lock(g_resolve_mutex);
     ClassMeta& cls = g_classes[class_id];
-    if (cls.resolved) return;  // re-entrant call after another thread/frame already resolved it
+    if (cls.resolved.load(std::memory_order_acquire)) return;
 
     const char* jni_name = get_str(cls.jni_name_offset);
     jclass local = find_class(env, jni_name);
@@ -111,7 +111,7 @@ static void resolve_class_slots(JNIEnv* env, uint32_t class_id) {
             if (!cls.field_ids[i]) { env->ExceptionClear(); LOGW("field unavailable: %s#%s", jni_name, fname); }
         }
     }
-    cls.resolved = true;
+    cls.resolved.store(true, std::memory_order_release);
 }
 
 // ── v9 FIX 3 + FIX 4: full tag coverage, bounded, bounds-checked ────────
@@ -131,7 +131,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
     bool is_varargs = false;
     if (mm.param_count > 0) {
         char last_tag = tags[mm.param_count - 1];
-        static const std::string kVarargsArrayTags = "]qfdbch";
+        static const std::string kVarargsArrayTags = "[]qfdbch";
         bool last_is_array_tag = (last_tag == 'A' || last_tag == 'T' ||
                                    kVarargsArrayTags.find(last_tag) != std::string::npos);
         if (last_is_array_tag) {
@@ -559,7 +559,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
     JniLocalFrame _local_frame(env, 32);                                            \
     if (class_id >= g_class_count) throw std::runtime_error("Stratum: invalid class_id"); \
     ClassMeta& cls = g_classes[class_id];                                           \
-    if (!cls.resolved) resolve_class_slots(env, class_id);                          \
+    if (!cls.resolved.load(std::memory_order_acquire)) resolve_class_slots(env, class_id); \
     if (!cls.method_ids || slot >= cls.method_count) throw std::runtime_error("Stratum: invalid method slot"); \
     jmethodID mid = cls.method_ids[slot];                                           \
     if (!mid) throw std::runtime_error("Stratum: Method unavailable on device API"); \
@@ -911,7 +911,7 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
     JniLocalFrame _local_frame(env, 32); // v9 FIX 1
     ClassMeta& cls = g_classes[class_id];
-    if (!cls.resolved) resolve_class_slots(env, class_id);
+    if (!cls.resolved.load(std::memory_order_acquire)) resolve_class_slots(env, class_id);
     jmethodID mid = cls.method_ids[slot];
     if (!mid) throw std::runtime_error("Stratum: Constructor unavailable on this device API level");
 
@@ -961,7 +961,7 @@ void delete_ref(int64_t ptr) {
 }
 
 static inline void ensure_class_resolved(JNIEnv* env, uint32_t class_id) {
-    if (!g_classes[class_id].resolved) resolve_class_slots(env, class_id);
+    if (!g_classes[class_id].resolved.load(std::memory_order_acquire)) resolve_class_slots(env, class_id);
 }
 
 // ── Field access primitives ──────────────────────────────────────────────

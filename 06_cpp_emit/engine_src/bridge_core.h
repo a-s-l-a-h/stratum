@@ -65,7 +65,7 @@ extern jclass    g_class_class;
 extern jclass    g_object_class;
 extern jclass    g_stratum_handler_class;
 extern std::unordered_map<std::string, std::shared_ptr<nb::callable>> g_callbacks;
-extern std::mutex g_callback_mutex;
+extern std::recursive_mutex g_callback_mutex;
 extern std::mutex g_activity_mutex;
 
 // ── API ──────────────────────────────────────────────────────────────────
@@ -123,15 +123,25 @@ struct JniLocalFrame {
         if (env_ && env_->PushLocalFrame(capacity) == 0) {
             active_ = true;
         }
-        // If PushLocalFrame fails (extremely low memory), we simply don't
-        // pop later — we do NOT throw here, because failing to get extra
-        // local-ref headroom is not itself fatal; the JNI call that
-        // follows may still succeed within the existing frame.
     }
     ~JniLocalFrame() {
         if (active_) {
             env_->PopLocalFrame(nullptr);
         }
+    }
+    // Use this INSTEAD of relying on the destructor whenever a local
+    // reference created inside the frame must survive past this
+    // function's return (e.g. handing a jobject/jstring back to the
+    // JVM). PopLocalFrame(result) migrates `result` into the parent
+    // frame before popping; PopLocalFrame(nullptr) — what the plain
+    // destructor does — deletes EVERY local ref including the one you
+    // were about to return, handing the JVM a dangling reference.
+    jobject pop(jobject result) {
+        if (active_) {
+            active_ = false;
+            return env_->PopLocalFrame(result);
+        }
+        return result;
     }
     JniLocalFrame(const JniLocalFrame&) = delete;
     JniLocalFrame& operator=(const JniLocalFrame&) = delete;

@@ -26,7 +26,8 @@ PRIMITIVE_MAP = {
     "D": ("jdouble",  "double",    "float", "direct"),
 }
 
-PROXY_SUFFIXES = ("Listener", "Callback", "Observer", "Handler", "Runnable")
+#(Removing "Handler" means any method taking an android.os.Handler will now be treated as tag 'L' — a normal Java object).
+PROXY_SUFFIXES = ("Listener", "Callback", "Observer", "Runnable")
 
 STRING_TYPES = {
     "java/lang/String",

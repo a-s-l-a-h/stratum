@@ -209,7 +209,12 @@ def main():
         records.append(sha256_record("stratum/__init__.py", init_data))
 
         so_data = so_path.read_bytes()
-        zf.writestr("stratum/_stratum.so", so_data)
+        so_info = zipfile.ZipInfo("stratum/_stratum.so")
+        so_info.external_attr = 0o755 << 16  # rwxr-xr-x — writestr() defaults to 0600, which
+                                              # makes dlopen() refuse to map it on-device with
+                                              # UnsatisfiedLinkError: ... Permission denied
+        so_info.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(so_info, so_data)
         records.append(sha256_record("stratum/_stratum.so", so_data))
 
         for f in sorted(py_dir.rglob("*")):

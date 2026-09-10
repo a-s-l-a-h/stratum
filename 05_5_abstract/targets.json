@@ -1,7 +1,8 @@
 {
   "enabled": true,
   "avoid": [
-    "android.app.admin.NetworkEvent"
+    "android.app.admin.NetworkEvent",
+    "android.os.Handler"
   ],
   "targets": [
 

@@ -20,7 +20,7 @@ jclass    g_object_class = nullptr;
 jclass    g_stratum_handler_class = nullptr;
 
 std::unordered_map<std::string, std::shared_ptr<nb::callable>> g_callbacks;
-std::mutex g_callback_mutex;
+std::recursive_mutex g_callback_mutex;
 std::mutex g_activity_mutex;
 
 static pthread_key_t  g_jni_detach_key;
@@ -73,7 +73,7 @@ jclass find_class(JNIEnv* env, const char* name) {
 static constexpr size_t STRATUM_MAX_CALLBACKS = 10000;
 
 void store_callback(const std::string& key, nb::callable fn) {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     g_callbacks[key] = std::make_shared<nb::callable>(std::move(fn));
     size_t sz = g_callbacks.size();
     if (sz > STRATUM_MAX_CALLBACKS && sz % 1000 == 0) {
@@ -87,30 +87,44 @@ void store_callback(const std::string& key, nb::callable fn) {
 }
 
 size_t stratum_callback_count() {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     return g_callbacks.size();
 }
 nb::callable get_callback(const std::string& key) {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     auto it = g_callbacks.find(key);
     return (it != g_callbacks.end() && it->second) ? *it->second : nb::callable();
 }
 
 void rekey_callback(const std::string& old_key, const std::string& new_key) {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     auto it = g_callbacks.find(old_key);
     if (it != g_callbacks.end()) {
+        // v9.1 FIX: alias, don't move. The Java-side adapter's `key_`
+        // field is `private final` and was already baked in as
+        // old_key at NewObjectA() time — Java can NEVER be told the
+        // new key. Erasing old_key here (the previous behaviour)
+        // meant every listener passed into a CONSTRUCTOR silently
+        // stopped working forever, because nativeDispatch() looks up
+        // exactly the key Java sends, which is always old_key.
         g_callbacks[new_key] = it->second;
-        g_callbacks.erase(it);
+        // old_key intentionally NOT erased — Java keeps calling it,
+        // and it must keep resolving.
     }
 }
 void remove_callback(const std::string& key) {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    // v9.1 FIX: erasing a map entry drops the last shared_ptr<nb::callable>,
+    // which runs Py_DECREF. That must never happen without the GIL —
+    // this is routinely called from delete_ref() during Python GC, which
+    // can run on a thread that never held the GIL, corrupting CPython.
+    nb::gil_scoped_acquire gil;
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     g_callbacks.erase(key);
 }
 
 size_t remove_callbacks_by_prefix(const std::string& prefix) {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    nb::gil_scoped_acquire gil;
+    std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
     size_t removed = 0;
     for (auto it = g_callbacks.begin(); it != g_callbacks.end(); ) {
         if (it->first.rfind(prefix, 0) == 0) {
@@ -205,13 +219,16 @@ nb::list stratum_collection_to_list(JNIEnv* env, jobject collection) {
         for (jint i = 0; i < len; ++i) {
             jobject item = env->CallObjectMethod(collection, mget, i);
             if (!item) { result.append(nb::none()); continue; }
-            if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
-                result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
-            } else {
-                jobject gref = env->NewGlobalRef(item);
-                env->DeleteLocalRef(item);
-                result.append(nb::cast((int64_t)(uintptr_t)gref));
-            }
+            // v9.1 FIX: use the SAME recursive converter as everything
+            // else. Previously this path unboxed nothing and wrapped
+            // every non-string element as a bare global-ref integer
+            // with no owner — no Python destructor ever released it,
+            // so every List/Set your app read leaked JNI global refs
+            // until ART aborted at the 51,200 ceiling. stratum_java_to_py
+            // unboxes primitives AND wraps real objects in an owned
+            // StratumObject (via _wrap_instance) whose __del__ frees it.
+            result.append(stratum_java_to_py(env, item, 1));
+            env->DeleteLocalRef(item);
         }
     } else {
         env->ExceptionClear();
@@ -224,15 +241,16 @@ nb::list stratum_collection_to_list(JNIEnv* env, jobject collection) {
                 jmethodID mnx = env->GetMethodID(ic, "next", "()Ljava/lang/Object;");
                 env->DeleteLocalRef(ic);
                 while (mhn && mnx && env->CallBooleanMethod(iter, mhn)) {
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
                     jobject item = env->CallObjectMethod(iter, mnx);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
                     if (!item) { result.append(nb::none()); continue; }
-                    if (g_jstring_class && env->IsInstanceOf(item, g_jstring_class)) {
-                        result.append(nb::str(stratum_jstring_to_str(env, item).c_str()));
-                    } else {
-                        jobject gref = env->NewGlobalRef(item);
-                        env->DeleteLocalRef(item);
-                        result.append(nb::cast((int64_t)(uintptr_t)gref));
-                    }
+                    // v9.2 FIX: same bug as the size()/get() path above —
+                    // this Set/Collection-without-index fallback was still
+                    // wrapping every non-String element as an orphaned
+                    // global-ref int with no Python owner to free it.
+                    result.append(stratum_java_to_py(env, item, 1));
+                    env->DeleteLocalRef(item);
                 }
                 env->DeleteLocalRef(iter);
             }
@@ -278,21 +296,10 @@ nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
         jobject ek = env->CallObjectMethod(entry, mkey);
         jobject ev = env->CallObjectMethod(entry, mval);
         env->DeleteLocalRef(entry);
-        nb::object pyk, pyv;
-        if (ek && g_jstring_class && env->IsInstanceOf(ek, g_jstring_class)) {
-            pyk = nb::str(stratum_jstring_to_str(env, ek).c_str());
-        } else if (ek) {
-            jobject gref = env->NewGlobalRef(ek);
-            env->DeleteLocalRef(ek);
-            pyk = nb::cast((int64_t)(uintptr_t)gref);
-        } else pyk = nb::none();
-        if (ev && g_jstring_class && env->IsInstanceOf(ev, g_jstring_class)) {
-            pyv = nb::str(stratum_jstring_to_str(env, ev).c_str());
-        } else if (ev) {
-            jobject gref = env->NewGlobalRef(ev);
-            env->DeleteLocalRef(ev);
-            pyv = nb::cast((int64_t)(uintptr_t)gref);
-        } else pyv = nb::none();
+        nb::object pyk = ek ? stratum_java_to_py(env, ek, 1) : nb::none();
+        if (ek) env->DeleteLocalRef(ek);
+        nb::object pyv = ev ? stratum_java_to_py(env, ev, 1) : nb::none();
+        if (ev) env->DeleteLocalRef(ev);
         result[pyk] = pyv;
     }
     env->DeleteLocalRef(iter);
@@ -897,7 +904,7 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
 
     std::shared_ptr<nb::callable> fn_ptr;
     {
-        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        std::lock_guard<std::recursive_mutex> lock(g_callback_mutex);
         auto it = g_callbacks.find(routed_key);
         if (it == g_callbacks.end()) it = g_callbacks.find(base_key);
         if (it != g_callbacks.end()) fn_ptr = it->second;
@@ -979,10 +986,10 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
                 env->ExceptionClear();
             }
         }
-        return nullptr;
+        return frame.pop(nullptr);
     } catch (const std::exception& e) {
         LOGE("nativeDispatch: native error: %s", e.what());
-        return nullptr;
+        return frame.pop(nullptr);
     }
 
     // Convert the Python return value into a boxed Java object so
@@ -990,27 +997,31 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
     // onLongClick, Comparator.compare, ...) get a real value.
     // NOTE: this only takes effect once StratumInvocationHandler.java's
     // invoke() actually forwards it — see the companion Java patch.
-    if (!py_result || py_result.is_none()) return nullptr;
+    if (!py_result || py_result.is_none()) return frame.pop(nullptr);
     if (nb::isinstance<nb::bool_>(py_result)) {
         jmethodID valueOf = env->GetStaticMethodID(s_bool_cls, "valueOf", "(Z)Ljava/lang/Boolean;");
-        return env->CallStaticObjectMethod(s_bool_cls, valueOf, nb::cast<bool>(py_result) ? JNI_TRUE : JNI_FALSE);
+        jobject o = env->CallStaticObjectMethod(s_bool_cls, valueOf, nb::cast<bool>(py_result) ? JNI_TRUE : JNI_FALSE);
+        return frame.pop(o);
     }
     if (nb::isinstance<nb::int_>(py_result)) {
         jmethodID valueOf = env->GetStaticMethodID(s_int_cls, "valueOf", "(I)Ljava/lang/Integer;");
-        return env->CallStaticObjectMethod(s_int_cls, valueOf, (jint)nb::cast<int64_t>(py_result));
+        jobject o = env->CallStaticObjectMethod(s_int_cls, valueOf, (jint)nb::cast<int64_t>(py_result));
+        return frame.pop(o);
     }
     if (nb::isinstance<nb::float_>(py_result)) {
         jmethodID valueOf = env->GetStaticMethodID(s_dbl_cls, "valueOf", "(D)Ljava/lang/Double;");
-        return env->CallStaticObjectMethod(s_dbl_cls, valueOf, (jdouble)nb::cast<double>(py_result));
+        jobject o = env->CallStaticObjectMethod(s_dbl_cls, valueOf, (jdouble)nb::cast<double>(py_result));
+        return frame.pop(o);
     }
     if (nb::isinstance<nb::str>(py_result)) {
-        return stratum_str_to_jstring(env, nb::cast<std::string>(py_result));
+        jobject o = (jobject)stratum_str_to_jstring(env, nb::cast<std::string>(py_result));
+        return frame.pop(o);
     }
     if (nb::hasattr(py_result, "_ptr")) {
         jobject rv = (jobject)(uintptr_t)nb::cast<int64_t>(py_result.attr("_ptr"));
         LOGT("<< PY->JAVA DISPATCH key='%s' returned object ptr=%p", routed_key.c_str(), (void*)rv);
-        return rv;
+        return frame.pop(rv);
     }
     LOGT("<< PY->JAVA DISPATCH key='%s' returned null/void", routed_key.c_str());
-    return nullptr;
+    return frame.pop(nullptr);
 }

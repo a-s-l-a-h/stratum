@@ -53,7 +53,17 @@ static void dispatch_lifecycle(const char* name) {
         if (it != g_lifecycle_cbs.end()) fn = it->second;
     }
     if (fn.is_valid()) {
-        try { fn(); } catch (const std::exception& e) { LOGE("Lifecycle %s error: %s", name, e.what()); }
+        try {
+            fn();
+        } catch (nb::python_error& e) {
+            LOGE("Lifecycle %s Python error: %s", name, e.what());
+            e.restore();
+            PyErr_Clear();  // without this, CPython's per-thread error
+                             // indicator stays set and the NEXT unrelated
+                             // Python/C-API call on this thread fails
+        } catch (const std::exception& e) {
+            LOGE("Lifecycle %s native error: %s", name, e.what());
+        }
     }
 }
 
@@ -235,4 +245,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativ
 extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativeOnResume(JNIEnv*, jobject)  { dispatch_lifecycle("onResume"); }
 extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativeOnPause(JNIEnv*, jobject)   { dispatch_lifecycle("onPause"); }
 extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativeOnStop(JNIEnv*, jobject)    { dispatch_lifecycle("onStop"); }
-extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativeOnDestroy(JNIEnv*, jobject) { dispatch_lifecycle("onDestroy"); }
+extern "C" JNIEXPORT void JNICALL Java_com_stratum_runtime_StratumActivity_nativeOnDestroy(JNIEnv* env, jobject) {
+    dispatch_lifecycle("onDestroy");
+    std::lock_guard<std::mutex> lk(g_activity_mutex);
+    if (g_activity) {
+        env->DeleteGlobalRef(g_activity);
+        g_activity = nullptr;
+    }
+}

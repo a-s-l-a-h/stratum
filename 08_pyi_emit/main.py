@@ -199,11 +199,11 @@ def _overload_condition(tag0: str, param0: dict) -> str:
     if tag0 in _OVERLOAD_TYPE_CHECK:
         return _OVERLOAD_TYPE_CHECK[tag0]
     if tag0 in ("L", "a", "p"):
-        java_type = param0.get("java_type", "")
-        if java_type:
+        target_cid = param0.get("_target_class_id")
+        if target_cid is not None:
             return (
-                f"(getattr(args[0], '_FQN', None) == '{java_type}') "
-                f"or not hasattr(args[0], '_FQN')"
+                f"(not hasattr(args[0], '_ptr') or not args[0]._ptr "
+                f"or _core.is_instance_of(args[0]._ptr, {target_cid}))"
             )
     return "True"
 

@@ -664,20 +664,43 @@ def _build_method_overrides(cls_name: str, methods: List[Dict[str, Any]], is_int
         else:
             args_expression = "new Object[0]"
 
-        lines.extend([
-            "    @Override",
-            f"    public {return_java} {method_name}({', '.join(signature_params)}) {{",
-            f"        StratumInvocationHandler.nativeDispatch(",
-            f'            key_, "{method_name}", {args_expression});',
-        ])
-
-        if return_stmt:
-            lines.append(f"        {return_stmt}")
-
-        lines.extend([
-            "    }",
-            "",
-        ])
+        if return_java == "void":
+            lines.extend([
+                "    @Override",
+                f"    public void {method_name}({', '.join(signature_params)}) {{",
+                f"        StratumInvocationHandler.nativeDispatch(",
+                f'            key_, "{method_name}", {args_expression});',
+                "    }",
+                "",
+            ])
+        else:
+            # v9.1 FIX: previously the return value of nativeDispatch()
+            # was discarded and a hardcoded default (return false/0/
+            # null) was always returned. Any callback whose return
+            # value controls behaviour — onLongClick/onTouch (consume
+            # the gesture), shouldOverrideUrlLoading (intercept nav),
+            # Comparator.compare — always used the default, so Python
+            # code could never actually influence Java from here.
+            unbox = {
+                "boolean": "((Boolean) __r).booleanValue()",
+                "int":     "((Integer) __r).intValue()",
+                "long":    "((Long) __r).longValue()",
+                "float":   "((Float) __r).floatValue()",
+                "double":  "((Double) __r).doubleValue()",
+                "char":    "((Character) __r).charValue()",
+                "byte":    "((Byte) __r).byteValue()",
+                "short":   "((Short) __r).shortValue()",
+            }.get(return_java, f"({return_java}) __r")
+            lines.extend([
+                "    @Override",
+                f"    public {return_java} {method_name}({', '.join(signature_params)}) {{",
+                f"        Object __r = StratumInvocationHandler.nativeDispatch(",
+                f'            key_, "{method_name}", {args_expression});',
+                f"        if (__r == null) {{ {return_stmt} }}",
+                f"        return {unbox};",
+                "    }",
+                "",
+            ])
 
     return lines
 
