@@ -18,6 +18,7 @@
 // std::mutex deadlocks the app forever (self-lock). recursive_mutex
 // allows the same thread to re-enter safely; a different thread still
 // blocks normally until the first resolution completes.
+static thread_local std::vector<std::string>* t_ctor_callback_keys = nullptr;
 static std::recursive_mutex g_resolve_mutex;
 static inline const char* get_str(uint32_t off) { return &g_str_pool[off]; }
 
@@ -27,6 +28,7 @@ static inline const char* get_str(uint32_t off) { return &g_str_pool[off]; }
 // nothing is eager, nothing can fail to compile because of a missing
 // dependency (there IS no per-class C++ TYPE anymore).
 static void resolve_class_slots(JNIEnv* env, uint32_t class_id) {
+    if (class_id >= g_class_count) throw std::runtime_error("Stratum: class_id out of range");
     std::lock_guard<std::recursive_mutex> lock(g_resolve_mutex);
     ClassMeta& cls = g_classes[class_id];
     if (cls.resolved) return;  // re-entrant call after another thread/frame already resolved it
@@ -403,6 +405,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 }
                 static std::atomic<uint64_t> s_aid{0};
                 std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_a_") : "adapter_") + std::to_string(++s_aid);
+                if (!caller_ptr && t_ctor_callback_keys) t_ctor_callback_keys->push_back(key);
                 if (nb::isinstance<nb::callable>(item)) {
                     store_callback(key, nb::cast<nb::callable>(item));
                 } else if (nb::isinstance<nb::dict>(item)) {
@@ -433,7 +436,13 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 }
                 static std::atomic<uint64_t> s_pid{0};
                 std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_p_") : "proxy_") + std::to_string(++s_pid);
-                if (nb::isinstance<nb::callable>(item)) store_callback(key, nb::cast<nb::callable>(item));
+                if (!caller_ptr && t_ctor_callback_keys) t_ctor_callback_keys->push_back(key);
+                if (nb::isinstance<nb::callable>(item)) {
+                    store_callback(key, nb::cast<nb::callable>(item));
+                } else if (nb::isinstance<nb::dict>(item)) {
+                    nb::dict d = nb::cast<nb::dict>(item);
+                    for (auto kv : d) store_callback(key + "#" + nb::cast<std::string>(kv.first), nb::cast<nb::callable>(kv.second));
+                }
                 const char* iface_name = get_str(mm.adapter_jni_offset);
                 jclass iface_cls = find_class(env, iface_name);
                 if (!iface_cls) throw std::runtime_error(std::string("Stratum: interface not found: ") + iface_name);
@@ -734,13 +743,19 @@ nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args
         if (len > 0) env->GetCharArrayRegion(ca, 0, len, buf.data());
         env->DeleteLocalRef(res);
         std::string utf8;
-        for (jsize i = 0; i < len; ++i) {
-            uint16_t c = (uint16_t)buf[i];
-            if (c < 0x80) { utf8 += (char)c; }
-            else if (c < 0x800) { utf8 += (char)(0xC0 | (c >> 6)); utf8 += (char)(0x80 | (c & 0x3F)); }
-            else { utf8 += (char)(0xE0 | (c >> 12)); utf8 += (char)(0x80 | ((c >> 6) & 0x3F)); utf8 += (char)(0x80 | (c & 0x3F)); }
+        for (jsize i = 0; i < len; ) {
+            uint32_t cp; uint16_t c1 = (uint16_t)buf[i++];
+            if (c1 >= 0xD800 && c1 <= 0xDBFF && i < len) {
+                uint16_t c2 = (uint16_t)buf[i];
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) { cp = 0x10000u + (((uint32_t)(c1 - 0xD800u)) << 10) + (uint32_t)(c2 - 0xDC00u); ++i; }
+                else cp = c1;
+            } else cp = c1;
+            if (cp < 0x80) utf8 += (char)cp;
+            else if (cp < 0x800) { utf8 += (char)(0xC0 | (cp >> 6)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { utf8 += (char)(0xE0 | (cp >> 12)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
+            else { utf8 += (char)(0xF0 | (cp >> 18)); utf8 += (char)(0x80 | ((cp >> 12) & 0x3F)); utf8 += (char)(0x80 | ((cp >> 6) & 0x3F)); utf8 += (char)(0x80 | (cp & 0x3F)); }
         }
-        return nb::str(utf8.c_str());
+        return nb::str(utf8.data(), utf8.size());
     }
 
     // 8. short[] -> return list[int]
@@ -816,9 +831,12 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     jmethodID mid = cls.method_ids[slot];
     if (!mid) throw std::runtime_error("Stratum: Constructor unavailable on this device API level");
 
+    std::vector<std::string> ctor_keys;
+    t_ctor_callback_keys = &ctor_keys;
     jvalue jargs[32] = {};
     std::vector<jobject> locals;
     pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals);
+    t_ctor_callback_keys = nullptr;
 
     jobject obj;
     {
@@ -830,7 +848,22 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     if (!obj) return 0;
     jobject gref = env->NewGlobalRef(obj);
     env->DeleteLocalRef(obj);
-    return (int64_t)(uintptr_t)gref;
+    int64_t new_ptr = (int64_t)(uintptr_t)gref;
+
+    for (const std::string& old_key : ctor_keys) {
+        size_t us1 = old_key.find('_');
+        size_t us2 = old_key.find('_', us1 + 1);
+        std::string rest = (us2 != std::string::npos) ? old_key.substr(us2) : "";
+        rekey_callback(old_key, "obj_" + std::to_string(new_ptr) + rest);
+    }
+    return new_ptr;
+}
+
+int64_t clone_ref(int64_t ptr) {
+    if (!ptr) return 0;
+    JNIEnv* env = get_env();
+    if (!env) return 0;
+    return (int64_t)(uintptr_t)env->NewGlobalRef((jobject)(uintptr_t)ptr);
 }
 
 void delete_ref(int64_t ptr) {
@@ -864,11 +897,16 @@ int64_t field_get_i(int64_t ptr, uint32_t class_id, uint32_t slot) {
     jfieldID fid = cls.field_ids[slot];
     if (!fid) throw std::runtime_error("Stratum: field unavailable on this device API level");
     if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
-    jint res = cls.fields[slot].is_static
-        ? env->GetStaticIntField(cls.class_ref, fid)
-        : env->GetIntField((jobject)(uintptr_t)ptr, fid);
+    bool is_stat = cls.fields[slot].is_static;
+    jobject target = (jobject)(uintptr_t)ptr;
+    uint8_t tid = cls.fields[slot].type_id;
+    int64_t res;
+    if (tid == 2) res = (int64_t)(is_stat ? env->GetStaticByteField(cls.class_ref, fid) : env->GetByteField(target, fid));
+    else if (tid == 3) res = (int64_t)(is_stat ? env->GetStaticCharField(cls.class_ref, fid) : env->GetCharField(target, fid));
+    else if (tid == 4) res = (int64_t)(is_stat ? env->GetStaticShortField(cls.class_ref, fid) : env->GetShortField(target, fid));
+    else res = (int64_t)(is_stat ? env->GetStaticIntField(cls.class_ref, fid) : env->GetIntField(target, fid));
     stratum_check_java_exc(env);
-    return (int64_t)res;
+    return res;
 }
 
 bool field_get_z(int64_t ptr, uint32_t class_id, uint32_t slot) {
@@ -976,8 +1014,13 @@ void field_set_i(int64_t ptr, uint32_t class_id, uint32_t slot, int64_t val) {
     jfieldID fid = cls.field_ids[slot];
     if (!fid) throw std::runtime_error("Stratum: field unavailable");
     if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
-    if (cls.fields[slot].is_static) env->SetStaticIntField(cls.class_ref, fid, (jint)val);
-    else env->SetIntField((jobject)(uintptr_t)ptr, fid, (jint)val);
+    bool is_stat = cls.fields[slot].is_static;
+    jobject target = (jobject)(uintptr_t)ptr;
+    uint8_t tid = cls.fields[slot].type_id;
+    if (tid == 2) { if (is_stat) env->SetStaticByteField(cls.class_ref, fid, (jbyte)val); else env->SetByteField(target, fid, (jbyte)val); }
+    else if (tid == 3) { if (is_stat) env->SetStaticCharField(cls.class_ref, fid, (jchar)val); else env->SetCharField(target, fid, (jchar)val); }
+    else if (tid == 4) { if (is_stat) env->SetStaticShortField(cls.class_ref, fid, (jshort)val); else env->SetShortField(target, fid, (jshort)val); }
+    else { if (is_stat) env->SetStaticIntField(cls.class_ref, fid, (jint)val); else env->SetIntField(target, fid, (jint)val); }
     stratum_check_java_exc(env);
 }
 
@@ -1026,7 +1069,7 @@ void field_set_d(int64_t ptr, uint32_t class_id, uint32_t slot, double val) {
     stratum_check_java_exc(env);
 }
 
-void field_set_str(int64_t ptr, uint32_t class_id, uint32_t slot, const std::string& val) {
+void field_set_str(int64_t ptr, uint32_t class_id, uint32_t slot, nb::object val) {
     JNIEnv* env = get_env();
     if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
     JniLocalFrame _local_frame(env, 8);
@@ -1035,7 +1078,7 @@ void field_set_str(int64_t ptr, uint32_t class_id, uint32_t slot, const std::str
     jfieldID fid = cls.field_ids[slot];
     if (!fid) throw std::runtime_error("Stratum: field unavailable");
     if (!cls.fields[slot].is_static && !ptr) throw std::runtime_error("Stratum: field access on null Java object");
-    jstring js = stratum_str_to_jstring(env, val);
+    jstring js = val.is_none() ? nullptr : stratum_str_to_jstring(env, nb::cast<std::string>(val));
     if (cls.fields[slot].is_static) env->SetStaticObjectField(cls.class_ref, fid, js);
     else env->SetObjectField((jobject)(uintptr_t)ptr, fid, js);
     stratum_check_java_exc(env);
@@ -1079,8 +1122,16 @@ nb::object bytebuffer_to_memoryview(int64_t ptr) {
     void* addr = env->GetDirectBufferAddress(bb);
     jlong cap = addr ? env->GetDirectBufferCapacity(bb) : 0;
     if (addr && cap > 0) {
+        // Pin the Java ByteBuffer alive for as long as Python holds the
+        // memoryview — otherwise the JVM can free the backing memory
+        // while Python is still reading/writing it.
+        jobject owner_gref = env->NewGlobalRef(bb);
+        nb::capsule owner(owner_gref, [](void* p) noexcept {
+            JNIEnv* e = get_env();
+            if (e && p) e->DeleteGlobalRef((jobject)p);
+        });
         Py_buffer view;
-        if (PyBuffer_FillInfo(&view, nullptr, addr, (Py_ssize_t)cap, 0, PyBUF_WRITABLE) == -1) {
+        if (PyBuffer_FillInfo(&view, owner.ptr(), addr, (Py_ssize_t)cap, 0, PyBUF_WRITABLE) == -1) {
             PyErr_Clear();
             return nb::none();
         }

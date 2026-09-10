@@ -68,6 +68,7 @@ nb::callable get_callback(const std::string& key);
 void         remove_callback(const std::string& key);
 size_t       remove_callbacks_by_prefix(const std::string& prefix);
 size_t       stratum_callback_count();
+void rekey_callback(const std::string& old_key, const std::string& new_key);
 
 // Object inspection & downcast verification
 bool         is_instance_of(int64_t ptr, uint32_t class_id);

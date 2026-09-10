@@ -17,6 +17,7 @@ nb::object call_arr(int64_t, uint32_t, uint32_t, nb::args);
 nb::object call_list(int64_t, uint32_t, uint32_t, nb::args);
 nb::object call_map(int64_t, uint32_t, uint32_t, nb::args);
 int64_t new_instance(uint32_t, uint32_t, nb::args);
+int64_t clone_ref(int64_t);
 void delete_ref(int64_t);
 int64_t field_get_i(int64_t, uint32_t, uint32_t);
 bool field_get_z(int64_t, uint32_t, uint32_t);
@@ -28,7 +29,7 @@ void field_set_i(int64_t, uint32_t, uint32_t, int64_t);
 void field_set_z(int64_t, uint32_t, uint32_t, bool);
 void field_set_j(int64_t, uint32_t, uint32_t, int64_t);
 void field_set_d(int64_t, uint32_t, uint32_t, double);
-void field_set_str(int64_t, uint32_t, uint32_t, const std::string&);
+void field_set_str(int64_t, uint32_t, uint32_t, nb::object);
 void field_set_o(int64_t, uint32_t, uint32_t, int64_t);
 bool is_same_object(int64_t, int64_t);
 nb::object bytebuffer_to_memoryview(int64_t);
@@ -43,6 +44,7 @@ static std::unordered_map<std::string, nb::callable> g_lifecycle_cbs;
 static std::mutex g_lifecycle_mutex;
 
 static void dispatch_lifecycle(const char* name) {
+    nb::gil_scoped_acquire gil;
     nb::callable fn;
     {
         std::lock_guard<std::mutex> lk(g_lifecycle_mutex);
@@ -50,7 +52,6 @@ static void dispatch_lifecycle(const char* name) {
         if (it != g_lifecycle_cbs.end()) fn = it->second;
     }
     if (fn.is_valid()) {
-        nb::gil_scoped_acquire gil;
         try { fn(); } catch (const std::exception& e) { LOGE("Lifecycle %s error: %s", name, e.what()); }
     }
 }
@@ -101,6 +102,7 @@ NB_MODULE(_stratum, m) {
     m.def("call_list", &call_list);
     m.def("call_map", &call_map);
     m.def("new_instance", &new_instance);
+    m.def("clone_ref", &clone_ref);
     m.def("delete_ref", &delete_ref);
 
     m.def("field_get_i", &field_get_i);
@@ -130,7 +132,15 @@ NB_MODULE(_stratum, m) {
 
     m.def("get_activity_ptr", []() -> int64_t {
         std::lock_guard<std::mutex> lk(g_activity_mutex);
-        return (int64_t)(uintptr_t)g_activity;
+        if (!g_activity) return 0;
+        JNIEnv* env = get_env();
+        if (!env) return (int64_t)(uintptr_t)g_activity;
+        // Each Python wrapper must own an INDEPENDENT global ref — its
+        // __del__ calls delete_ref() -> DeleteGlobalRef() on whatever
+        // pointer it was given. Handing out the raw g_activity pointer
+        // means the first Activity wrapper GC'd deletes the shared ref
+        // out from under the whole engine.
+        return (int64_t)(uintptr_t)env->NewGlobalRef(g_activity);
     });
 
     m.def("set_lifecycle_callback", [](const std::string& name, nb::callable fn) {

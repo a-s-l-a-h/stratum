@@ -184,9 +184,9 @@ def emit_metadata_table(classes: list, pool: StringPool) -> tuple:
         )
     cpp.append("};")
     cpp.append("")
-    cpp.append(f"const uint32_t g_class_count = {len(classes)};")
+    cpp.append(f"extern const uint32_t g_class_count = {len(classes)};")
     cpp.append("")
-    cpp.append(f"const char g_str_pool[{len(pool.pool)}] = {{")
+    cpp.append(f"extern const char g_str_pool[{len(pool.pool)}] = {{")
     hexb = [f"0x{b:02x}" for b in pool.pool]
     for i in range(0, len(hexb), 16):
         cpp.append("    " + ", ".join(hexb[i:i + 16]) + ",")

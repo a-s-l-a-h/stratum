@@ -90,6 +90,15 @@ nb::callable get_callback(const std::string& key) {
     auto it = g_callbacks.find(key);
     return (it != g_callbacks.end() && it->second) ? *it->second : nb::callable();
 }
+
+void rekey_callback(const std::string& old_key, const std::string& new_key) {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    auto it = g_callbacks.find(old_key);
+    if (it != g_callbacks.end()) {
+        g_callbacks[new_key] = it->second;
+        g_callbacks.erase(it);
+    }
+}
 void remove_callback(const std::string& key) {
     std::lock_guard<std::mutex> lock(g_callback_mutex);
     g_callbacks.erase(key);
@@ -297,16 +306,18 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
         env->ReleaseStringUTFChars(jmethod, mc);
     }
 
-    nb::callable fn;
+    std::shared_ptr<nb::callable> fn_ptr;
     {
         std::lock_guard<std::mutex> lock(g_callback_mutex);
         auto it = g_callbacks.find(routed_key);
         if (it == g_callbacks.end()) it = g_callbacks.find(base_key);
-        if (it != g_callbacks.end() && it->second) fn = *it->second;
+        if (it != g_callbacks.end()) fn_ptr = it->second;
     }
-    if (!fn.is_valid()) { LOGW("nativeDispatch: no callback bound for %s", routed_key.c_str()); return nullptr; }
+    if (!fn_ptr) { LOGW("nativeDispatch: no callback bound for %s", routed_key.c_str()); return nullptr; }
 
     nb::gil_scoped_acquire acquire;
+    // Only touch the callable's refcount now that the GIL is actually held.
+    nb::callable fn = *fn_ptr;
     JniLocalFrame frame(env, 32);
 
     // Cache primitive wrapper classes once. Without unboxing, a Java

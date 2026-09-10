@@ -636,7 +636,7 @@ class StratumObject:
             if not _core.is_instance_of(ptr, cls._CLASS_ID):
                 target_name = getattr(cls, "_FQN", cls.__name__)
                 raise TypeError(f"Object at 0x{ptr:x} is not an instance of {target_name}")
-        return cls(_ptr=ptr)
+        return cls(_ptr=_core.clone_ref(ptr))
 
     @classmethod
     def _stratum_cast(cls, obj_or_ptr):
