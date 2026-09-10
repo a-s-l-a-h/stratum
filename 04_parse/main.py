@@ -575,7 +575,7 @@ def parse_javap(text: str) -> dict:
                     #        public static final java.lang.String SOME_KEY;
                     core = stripped
                     for mod in ("public", "protected", "private", "static", "final"):
-                        core = core.replace(mod + " ", "")
+                        core = re.sub(rf"\b{mod}\s+", "", core)
                     core = core.strip().rstrip(";")
                     # Extract inline value
                     const_val = None
@@ -614,7 +614,7 @@ def parse_javap(text: str) -> dict:
             for mod in ("public", "protected", "private", "static", "final",
                         "abstract", "synchronized", "native", "transient",
                         "volatile", "default"):
-                core = core.replace(mod + " ", "")
+                core = re.sub(rf"\b{mod}\s+", "", core)
             core = core.strip().rstrip(";").rstrip("{").strip()
             # Remove throws clause from core
             # Remove throws clause from core
@@ -632,8 +632,8 @@ def parse_javap(text: str) -> dict:
 
             # Inner class constructors include outer class param: ClassName(OuterClass, ...)
             is_constructor = bool(
-                re.match(rf"{re.escape(simple)}\s*\(", core)
-                or re.match(rf"{re.escape(fqn_check)}\s*\(", core)
+                re.search(rf"(?:^|\.|\$){re.escape(simple)}\s*\(", core)
+                or re.search(rf"(?:^|\.|\$){re.escape(fqn_check)}\s*\(", core)
             )
 
             if is_constructor:

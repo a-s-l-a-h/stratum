@@ -292,7 +292,9 @@ nb::dict stratum_map_to_dict(JNIEnv* env, jobject map) {
     jmethodID mval = entry_iface ? env->GetMethodID(entry_iface, "getValue", "()Ljava/lang/Object;") : nullptr;
     if (entry_iface) env->DeleteLocalRef(entry_iface);
     while (mhn && mnx && mkey && mval && env->CallBooleanMethod(iter, mhn)) {
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         jobject entry = env->CallObjectMethod(iter, mnx);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         jobject ek = env->CallObjectMethod(entry, mkey);
         jobject ev = env->CallObjectMethod(entry, mval);
         env->DeleteLocalRef(entry);

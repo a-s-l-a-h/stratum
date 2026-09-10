@@ -220,6 +220,11 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     const char* data = nullptr; Py_ssize_t len = 0;
                     if (stratum_get_buffer(item, &data, &len, &view, &needs_release)) {
                         jbyteArray ja = env->NewByteArray((jsize)len);
+                        if (!ja) {
+                            if (needs_release) PyBuffer_Release(&view);
+                            stratum_check_java_exc(env);
+                            throw std::runtime_error("Stratum: OOM allocating byte[]");
+                        }
                         if (len > 0) env->SetByteArrayRegion(ja, 0, (jsize)len, reinterpret_cast<const jbyte*>(data));
                         jargs[i].l = ja; locals.push_back(ja);
                         if (needs_release) PyBuffer_Release(&view);
@@ -237,6 +242,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jintArray ja = env->NewIntArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating int[]"); }
                     std::vector<jint> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = (jint)nb::cast<int64_t>(l[k]);
                     if (sz > 0) env->SetIntArrayRegion(ja, 0, sz, buf.data());
@@ -254,6 +260,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jlongArray ja = env->NewLongArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating long[]"); }
                     std::vector<jlong> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = (jlong)nb::cast<int64_t>(l[k]);
                     if (sz > 0) env->SetLongArrayRegion(ja, 0, sz, buf.data());
@@ -271,6 +278,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jfloatArray ja = env->NewFloatArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating float[]"); }
                     std::vector<jfloat> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = (jfloat)nb::cast<double>(l[k]);
                     if (sz > 0) env->SetFloatArrayRegion(ja, 0, sz, buf.data());
@@ -288,6 +296,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jdoubleArray ja = env->NewDoubleArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating double[]"); }
                     std::vector<jdouble> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = (jdouble)nb::cast<double>(l[k]);
                     if (sz > 0) env->SetDoubleArrayRegion(ja, 0, sz, buf.data());
@@ -305,6 +314,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jbooleanArray ja = env->NewBooleanArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating boolean[]"); }
                     std::vector<jboolean> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = nb::cast<bool>(l[k]) ? JNI_TRUE : JNI_FALSE;
                     if (sz > 0) env->SetBooleanArrayRegion(ja, 0, sz, buf.data());
@@ -322,6 +332,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jcharArray ja = env->NewCharArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating char[]"); }
                     std::vector<jchar> buf(sz);
                     for (jsize k = 0; k < sz; ++k) {
                         if (nb::isinstance<nb::str>(l[k])) {
@@ -346,6 +357,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jshortArray ja = env->NewShortArray(sz);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating short[]"); }
                     std::vector<jshort> buf(sz);
                     for (jsize k = 0; k < sz; ++k) buf[k] = (jshort)nb::cast<int>(l[k]);
                     if (sz > 0) env->SetShortArrayRegion(ja, 0, sz, buf.data());
@@ -363,6 +375,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jobjectArray ja = env->NewObjectArray(sz, g_jstring_class, nullptr);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating String[]"); }
                     for (jsize k = 0; k < sz; ++k) {
                         auto elem = l[k];
                         if (elem.is_none()) {
@@ -389,6 +402,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     nb::list l = stratum_to_list(item);
                     jsize sz = (jsize)nb::len(l);
                     jobjectArray ja = env->NewObjectArray(sz, g_object_class, nullptr);
+                    if (!ja) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating Object[]"); }
                     for (jsize k = 0; k < sz; ++k) {
                         auto elem = l[k];
                         if (elem.is_none()) {

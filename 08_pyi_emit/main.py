@@ -282,21 +282,26 @@ def build_field_accessors(fields: list, class_id: int) -> list:
         prefix = "sf" if is_static else "f"
         target = "0" if is_static else "self._ptr"
 
+        field_fqn = f.get("java_type", "")
         if is_static:
             lines.append("    @staticmethod")
             lines.append(f"    def {prefix}_get_{fname}():")
             if fget == "field_get_o":
                 lines.append(f"        _ptr = _core.{fget}({target}, {class_id}, {fslot})")
-                lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
+                if field_fqn:
+                    lines.append(f"        return _wrap_instance(_ptr, '{field_fqn}') if _ptr else None")
+                else:
+                    lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
             else:
-                # field_get_arr (and every scalar getter) already returns
-                # a plain Python value — list/bytes/str/int/etc.
                 lines.append(f"        return _core.{fget}({target}, {class_id}, {fslot})")
         else:
             lines.append(f"    def {prefix}_get_{fname}(self):")
             if fget == "field_get_o":
                 lines.append(f"        _ptr = _core.{fget}(self._ptr, {class_id}, {fslot})")
-                lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
+                if field_fqn:
+                    lines.append(f"        return _wrap_instance(_ptr, '{field_fqn}') if _ptr else None")
+                else:
+                    lines.append(f"        return StratumObject(_ptr=_ptr) if _ptr else None")
             else:
                 lines.append(f"        return _core.{fget}(self._ptr, {class_id}, {fslot})")
         lines.append("")
@@ -583,9 +588,13 @@ class StratumObject:
         self._ptr = _ptr
 
     def __del__(self) -> None:
+        if _core is None:
+            # Interpreter teardown: module globals (including this file's
+            # `_core` import) can be cleared before every object is
+            # collected. Bail instead of raising from inside GC.
+            return
         ptr = getattr(self, "_ptr", None)
         if ptr:
-            # Delete callbacks attached to this object instance prefix and free ref
             _core.remove_callbacks_by_prefix(f"obj_{ptr}_")
             _core.delete_ref(ptr)
             self._ptr = None
