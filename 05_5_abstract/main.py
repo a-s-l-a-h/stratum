@@ -682,12 +682,16 @@ def _build_method_overrides(cls_name: str, methods: List[Dict[str, Any]], is_int
             # Comparator.compare — always used the default, so Python
             # code could never actually influence Java from here.
             unbox = {
-                "boolean": "((Boolean) __r).booleanValue()",
+                # Guards against a Python callback returning a plain int (e.g. `return 1`)
+                # instead of True/False for a boolean-typed listener like onTouch/onLongClick.
+                "boolean": "(__r instanceof Boolean) ? ((Boolean) __r).booleanValue() : (__r instanceof Number && ((Number) __r).intValue() != 0)",
                 "int":     "((Integer) __r).intValue()",
                 "long":    "((Long) __r).longValue()",
                 "float":   "((Float) __r).floatValue()",
                 "double":  "((Double) __r).doubleValue()",
-                "char":    "((Character) __r).charValue()",
+                # Guards against Python returning a standard string ('a') instead of a char,
+                # or a wrong-length string ("ab", ""), preventing ClassCastException on the UI thread.
+                "char":    "(__r instanceof Character) ? ((Character) __r).charValue() : ((__r instanceof CharSequence && ((CharSequence) __r).length() > 0) ? ((CharSequence) __r).charAt(0) : '\\0')",
                 "byte":    "((Byte) __r).byteValue()",
                 "short":   "((Short) __r).shortValue()",
             }.get(return_java, f"({return_java}) __r")
