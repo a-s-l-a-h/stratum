@@ -390,7 +390,15 @@ def emit_python_class(data: dict) -> str:
         lines.append(f"        ptr = _core.new_instance({class_id}, {first_slot}, *args)")
         lines.append("        super().__init__(_ptr=ptr)")
     else:
-        lines.append("        super().__init__(_ptr=None)")
+        # v10: a class with zero surviving constructors is either
+        # interface-shaped, a static utility class, or a factory-only
+        # system class (CameraDevice, MediaCodec, Window, ...) — fail
+        # loudly instead of silently building a null-pointer wrapper.
+        lines.append(
+            f'        raise TypeError("{fqn} has no accessible constructor. '
+            f'Obtain instances via the relevant Android factory method or '
+            f'system service instead.")'
+        )
     lines.append("")
 
     # ── Methods (grouped by name for overload dispatch) ─────────────
@@ -856,8 +864,10 @@ def _make_init(class_id, ctors, simple_name):
             StratumObject.__init__(self, _ptr=_ptr)
             return
         if not ctors:
-            StratumObject.__init__(self, _ptr=None)
-            return
+            raise TypeError(
+                f"{simple_name} has no accessible constructor. "
+                f"Obtain instances via the relevant Android factory method or system service instead."
+            )
         slot, _t, _jt, _cids, _rt, _rfqn = _pick_overload(ctors, args, simple_name)
         ptr = _core.new_instance(class_id, slot, *args)
         StratumObject.__init__(self, _ptr=ptr)

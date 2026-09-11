@@ -232,9 +232,30 @@ def parse_descriptor(descriptor: str) -> tuple[list[dict], dict]:
             while idx < len(descriptor) and descriptor[idx] == "[":
                 dims += 1
                 idx += 1
+
+            # v10 FIX: resolve the REAL element type instead of storing the
+            # literal word "array" — that word emitted verbatim into a
+            # generated Java adapter ("public array delete(byte[] a)")
+            # is a syntax error, which is exactly what caused the
+            # "cannot find symbol class array" javac failures.
+            elem_java = "Object"
+            if idx < len(descriptor):
+                elem_ch = descriptor[idx]
+                if elem_ch in PRIMITIVE_MAP:
+                    elem_java = PRIMITIVE_MAP[elem_ch][0].lstrip("j")  # jbyte -> byte
+                    idx += 1
+                elif elem_ch == "L":
+                    idx += 1
+                    start_pos = idx
+                    while idx < len(descriptor) and descriptor[idx] != ";":
+                        idx += 1
+                    elem_java = descriptor[start_pos:idx].replace("/", ".")
+                    idx += 1
+
             ret = {"jni_type": "jobject", "cpp_type": "jobject",
                    "python_type": "list", "conversion": "array_out",
-                   "java_type": "array", "is_array": True, "array_dims": dims}
+                   "java_type": f"{elem_java}{'[]' * dims}",
+                   "element_type": elem_java, "is_array": True, "array_dims": dims}
         else:
             ret = {"jni_type": "void", "cpp_type": "void",
                    "python_type": "None", "conversion": "none",
@@ -442,6 +463,7 @@ def parse_javap(text: str) -> dict:
 
             result["is_abstract"]  = "abstract" in stripped
             result["is_final"]     = "final" in stripped
+            result["is_static"]    = "static" in stripped
             result["is_enum"]      = is_enum_decl
 
             # Normalise @interface → treat as interface + annotation flag
@@ -593,6 +615,9 @@ def parse_javap(text: str) -> dict:
                             "java_type":      field_type,
                             "is_static":      True,
                             "is_final":       True,
+                            "is_private":     bool(re.search(r"\bprivate\b", stripped)),
+                            "is_protected":   bool(re.search(r"\bprotected\b", stripped)),
+                            "is_public":      bool(re.search(r"\bpublic\b", stripped)),
                             "constant_value": const_val,
                             "descriptor":     "",
                             "jni_type":       "jobject",
@@ -606,6 +631,10 @@ def parse_javap(text: str) -> dict:
             is_static = "static" in stripped
             is_abstract = "abstract" in stripped
             is_native = "native" in stripped
+            is_private = bool(re.search(r"\bprivate\b", stripped))
+            is_protected = bool(re.search(r"\bprotected\b", stripped))
+            is_public = bool(re.search(r"\bpublic\b", stripped))
+            is_final_method = bool(re.search(r"\bfinal\b", stripped))
 
             # Throws on this line
             pending_throws = parse_throws(stripped)
@@ -656,6 +685,10 @@ def parse_javap(text: str) -> dict:
                 "is_constructor":  is_constructor,
                 "is_abstract":     is_abstract,
                 "is_native":       is_native,
+                "is_private":      is_private,
+                "is_protected":    is_protected,
+                "is_public":       is_public,
+                "is_final":        is_final_method,
                 "return_hint":     return_type_hint,  # raw Java return type string
                 "jni_signature":   "",
                 "params":          [],

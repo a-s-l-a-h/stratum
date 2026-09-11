@@ -70,6 +70,68 @@ SKIP_SUMMARIES: frozenset = frozenset({
     "javap_summary.json",
 })
 
+# ── Default unified targets.json config (used to seed a missing file, and
+# to fill in any keys an OLD-style targets.json doesn't have) ──────────────
+DEFAULT_RESERVED_STRUCTURAL: list = [
+    "android.view.View", "android.view.ViewGroup", "android.app.Activity",
+    "android.app.Service", "android.content.BroadcastReceiver",
+    "android.content.ContentProvider", "android.app.Application",
+    "android.app.job.JobService", "android.graphics.drawable.Drawable",
+    "android.text.Layout", "android.text.style.ClickableSpan",
+    "android.text.style.MetricAffectingSpan",
+    "android.text.method.ReplacementTransformationMethod",
+    "android.text.method.NumberKeyListener",
+    "android.transition.Transition", "android.transition.TransitionPropagation",
+    "android.widget.CursorTreeAdapter",
+    "androidx.recyclerview.widget.RecyclerView$Adapter",
+    "androidx.recyclerview.widget.RecyclerView$ViewHolder",
+    "androidx.fragment.app.Fragment", "androidx.work.Worker",
+    "javax.crypto.CipherSpi", "javax.crypto.MacSpi",
+    "javax.crypto.KeyAgreementSpi", "javax.crypto.ExemptionMechanismSpi",
+    "javax.net.ssl.SSLEngine", "javax.net.ssl.HttpsURLConnection",
+    "javax.net.ssl.KeyManagerFactorySpi", "javax.net.ssl.ExtendedSSLSession",
+]
+DEFAULT_SEEDS: list = [
+    "android.hardware.camera2.CameraDevice$StateCallback",
+    "android.hardware.camera2.CameraCaptureSession$StateCallback",
+    "android.hardware.camera2.CameraCaptureSession$CaptureCallback",
+    "android.webkit.WebViewClient",
+    "android.webkit.WebChromeClient",
+]
+DEFAULT_AVOID: list = [
+    "android.app.admin.NetworkEvent",
+    "android.os.Handler",
+    "android.content.Context",
+    "android.content.pm.PackageManager",
+    "android.net.Uri",
+    "android.os.Vibrator",
+    "java.lang.Process",
+    "android.app.FragmentHostCallback",
+    "android.icu.text.UnicodeFilter",
+    "android.text.LoginFilter",
+]
+
+CALLBACK_PATTERNS: tuple = (
+    "Callback", "Listener", "Observer", "Client", "Filter"
+)
+
+
+def is_reserved(fqn: str, registry: Dict[str, Tuple[Dict[str, Any], Path]], reserved_set: Set[str]) -> bool:
+    """True if fqn, or any of its ancestors, is a reserved structural class
+    (handled by a hand-written runtime file, never a generic adapter)."""
+    seen: Set[str] = set()
+    cur = fqn
+    while cur and cur not in seen:
+        if cur in reserved_set or cur.startswith("java.lang.invoke.") or cur.startswith("java.lang.reflect."):
+            return True
+        seen.add(cur)
+        entry = registry.get(cur)
+        cur = entry[0].get("parent_fqn") if entry else None
+    return False
+
+
+
+
 # Methods defined directly on java.lang.Object that must never be treated as interface callbacks
 OBJECT_METHODS: frozenset = frozenset({
     "equals",
@@ -252,41 +314,61 @@ def clean_generics(sig: str) -> str:
 
 def jni_to_java_type(jni_type: str, java_type_hint: str = "") -> str:
     """
-    Convert a JNI type name and a Java type hint into a valid Java source type declaration.
-
-    Design Rule:
-        We trust the captured `java_type` from parsing whenever available.
-        Only when `java_type` is generic or absent do we fall back to the JNI descriptor.
+    Convert a JNI type + Java type hint into a valid Java source type.
+    v10: hardened so this NEVER emits the literal word "array" (root
+    cause of the "cannot find symbol class array" javac failures) and
+    correctly resolves bytecode array notation ([B, [I, [Ljava/lang/X;).
     """
     if jni_type in PRIMITIVE_JAVA_MAP:
         return PRIMITIVE_JAVA_MAP[jni_type]
-
     if jni_type in PRIMITIVE_ARRAY_MAP:
         return PRIMITIVE_ARRAY_MAP[jni_type]
 
-    norm_hint = java_type_hint.strip() if java_type_hint else ""
-    if norm_hint:
-        norm_hint = norm_hint.replace("/", ".").replace("$", ".")
-        norm_hint = clean_generics(norm_hint)
+    norm = java_type_hint.strip() if java_type_hint else ""
 
-        if norm_hint.endswith("CharSequence"):
+    # Bytecode array notation, e.g. "[B", "[I", "[Ljava/lang/String;", "[java.lang.String"
+    if norm.startswith("["):
+        dims = len(norm) - len(norm.lstrip("["))
+        clean = norm[dims:]
+        prim_map = {"B": "byte", "I": "int", "J": "long", "F": "float",
+                    "D": "double", "Z": "boolean", "C": "char", "S": "short"}
+        if clean in prim_map:
+            return f"{prim_map[clean]}{'[]' * dims}"
+        if clean.startswith("L") and clean.endswith(";"):
+            clean = clean[1:-1]
+        base = clean.replace("/", ".").replace("$", ".")
+        if base.startswith("java.lang.") and base.count(".") == 2:
+            base = base[10:]
+        return f"{base}{'[]' * dims}"
+
+    if norm and (norm == "array" or norm.strip() == ""):
+        # Should never happen after the 04_parse fix, but never emit the
+        # bare word "array" even if stale/unpatched JSON slips through.
+        norm = ""
+
+    if norm:
+        norm = norm.replace("/", ".").replace("$", ".")
+        norm = clean_generics(norm)
+        if norm.endswith("CharSequence"):
             return "CharSequence"
-
-        if norm_hint.startswith("[L") and norm_hint.endswith(";"):
-            base_type = norm_hint[2:-1]
-            if base_type.startswith("java.lang."):
-                base_type = base_type[10:]
-            return f"{base_type}[]"
-
-        if not norm_hint.startswith("["):
-            if norm_hint.startswith("java.lang."):
-                return norm_hint[10:]
-            return norm_hint
+        # FIX: Only strip java.lang. for top-level classes (e.g. java.lang.String -> String)
+        # Never strip subpackages (e.g. java.lang.invoke.MethodHandle MUST stay full)
+        if norm.startswith("java.lang.") and norm.count(".") == 2:
+            return norm[10:]
+        return norm
 
     if jni_type == "jstring":
         return "String"
     if jni_type == "jobjectArray":
         return "Object[]"
+    if jni_type == "jbyteArray": return "byte[]"
+    if jni_type == "jintArray": return "int[]"
+    if jni_type == "jlongArray": return "long[]"
+    if jni_type == "jfloatArray": return "float[]"
+    if jni_type == "jdoubleArray": return "double[]"
+    if jni_type == "jbooleanArray": return "boolean[]"
+    if jni_type == "jcharArray": return "char[]"
+    if jni_type == "jshortArray": return "short[]"
 
     return "Object"
 
@@ -401,6 +483,9 @@ def get_abstract_methods(data: Dict[str, Any], include_all_non_static: bool = Fa
             continue
         if method.get("is_static", False):
             continue
+        # javac forbids overriding private or final methods.
+        if method.get("is_private", False) or method.get("is_final", False):
+            continue
 
         method_name = method.get("name", "")
         if not method_name or method_name in OBJECT_METHODS:
@@ -410,8 +495,16 @@ def get_abstract_methods(data: Dict[str, Any], include_all_non_static: bool = Fa
         if not is_abstract and not include_all_non_static:
             continue
 
-        sig = method.get("jni_signature", "")
-        dedup_key = f"{method_name}|{sig}"
+        # v10 FIX: dedup by (name + Java PARAMETER TYPES), not by raw JNI
+        # signature. A covariant-return override (e.g. ViewGroup.getOverlay()
+        # vs View.getOverlay()) has two different JNI signatures for what
+        # Java sees as the SAME method — emitting both produced "method is
+        # already defined" javac errors.
+        param_types = [
+            jni_to_java_type(p.get("jni_type", "jobject"), p.get("java_type", ""))
+            for p in method.get("params", [])
+        ]
+        dedup_key = f"{method_name}({','.join(param_types)})"
 
         if dedup_key not in seen_keys:
             seen_keys.add(dedup_key)
@@ -454,26 +547,58 @@ def get_interface_methods(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 # Target Detection
 # =============================================================================
 
-def detect_abstract_classes(registry: Dict[str, Tuple[Dict[str, Any], Path]], seed_fqns: Optional[List[str]] = None) -> List[str]:
+def detect_abstract_classes(registry: Dict[str, Tuple[Dict[str, Any], Path]],
+                             seed_fqns: Optional[List[str]] = None,
+                             reserved_set: Optional[Set[str]] = None) -> List[str]:
     """
     Identify abstract classes in the registry requiring generated adapters.
-    If a class is explicitly present in seed_fqns, we allow it even if its
-    callback methods have default empty bodies.
+    v10: hardened with guards so every candidate returned here is
+    GUARANTEED to compile — nothing downstream needs to re-check this.
     """
     Logger.section("Detecting Abstract Classes")
     seed_set = set(seed_fqns or [])
+    reserved = reserved_set or set()
     detected: List[str] = []
 
     for fqn, (data, _) in registry.items():
-        if not data.get("is_abstract", False):
+        if data.get("is_interface", False) or data.get("is_annotation", False):
             continue
-        if data.get("is_interface", False):
+
+        # GUARD: structural/system OS classes are never subclassed generically.
+        if is_reserved(fqn, registry, reserved):
             continue
-        if data.get("is_annotation", False):
+
+        # DYNAMIC FILTER: Any class ending in Callback/Listener/Observer/Client/Filter, OR in seeds
+        is_seed = fqn in seed_set
+        is_callback_pattern = any(fqn.endswith(suffix) or f"${suffix}" in fqn for suffix in CALLBACK_PATTERNS)
+        if not (is_seed or is_callback_pattern):
+            continue
+
+        # Must be abstract, UNLESS it is a known callback class with default empty methods (e.g. WebViewClient)
+        if not data.get("is_abstract", False) and not is_seed:
+            continue
+
+        # GUARD: A generated adapter in com.stratum.adapters CANNOT compile super()
+        # unless the parent class has at least one public or protected constructor!
+        raw_ctors = [m for m in data.get("methods", []) if m.get("is_constructor", False)]
+        accessible_ctors = [
+            c for c in raw_ctors
+            if c.get("is_public", False) or c.get("is_protected", False)
+        ]
+        if not accessible_ctors:
             continue
 
         is_seed = fqn in seed_set
         methods = get_abstract_methods(data, include_all_non_static=is_seed)
+
+        # GUARD: a package-private abstract method can't be overridden
+        # from com.stratum.adapters.*.
+        has_package_private_abstract = any(
+            m.get("is_abstract", False) and not m.get("is_public", False) and not m.get("is_protected", False)
+            for m in methods
+        )
+        if has_package_private_abstract:
+            continue
 
         if not methods:
             if is_seed:
@@ -817,53 +942,54 @@ def patch_class_json(data: Dict[str, Any], successfully_adapted: Set[str]) -> Di
 # Configuration & Targets Loader
 # =============================================================================
 
-def load_targets(targets_path: Path) -> Tuple[bool, List[str], List[str]]:
+def load_targets(targets_path: Path) -> Tuple[List[str], Set[str], Set[str]]:
     """
-    Load 05_5_abstract/targets.json.
-    If none exists, create a default file containing common callback targets.
+    Load 05_5_abstract/targets.json — UNIFIED schema:
+        { "reserved_structural": [...], "avoid": [...], "seeds": [...] }
+
+    Backward compatible: an OLD-style file (with "targets": [{"fqn": ...}]
+    and/or an "enabled" flag) still loads correctly — "targets" is read as
+    "seeds", "enabled" is ignored (curated seeds are now ALWAYS unioned
+    with the full-registry scan; there's no more on/off trap), and any
+    key that's simply missing falls back to the built-in defaults rather
+    than being treated as empty.
+
+    Returns: (seeds, avoid_set, reserved_set)
     """
     Logger.section("Loading Adapter Configuration")
-    default_config = {
-        "enabled": True,
-        "avoid": [
-            "android.app.admin.NetworkEvent"
-        ],
-        "targets": [
-            {"fqn": "android.hardware.camera2.CameraDevice$StateCallback"},
-            {"fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback"},
-            {"fqn": "android.hardware.camera2.CameraCaptureSession$CaptureCallback"},
-            {"fqn": "android.view.TextureView$SurfaceTextureListener"},
-            {"fqn": "android.view.SurfaceHolder$Callback"},
-            {"fqn": "android.widget.SeekBar$OnSeekBarChangeListener"},
-            {"fqn": "android.widget.AdapterView$OnItemSelectedListener"},
-            {"fqn": "android.text.TextWatcher"},
-            {"fqn": "android.content.DialogInterface$OnClickListener"},
-            {"fqn": "android.content.DialogInterface$OnDismissListener"},
-            {"fqn": "android.content.DialogInterface$OnCancelListener"},
-            {"fqn": "android.hardware.SensorEventListener"},
-            {"fqn": "android.location.LocationListener"},
-            {"fqn": "android.media.ImageReader$OnImageAvailableListener"},
-            {"fqn": "android.webkit.WebViewClient"},
-            {"fqn": "android.webkit.WebChromeClient"},
-            {"fqn": "android.view.View$OnLongClickListener"},
-        ],
-    }
 
     if not targets_path.exists():
         Logger.info(f"Target configuration not found. Creating default: {targets_path}")
         targets_path.parent.mkdir(parents=True, exist_ok=True)
+        default_config = {
+            "reserved_structural": DEFAULT_RESERVED_STRUCTURAL,
+            "avoid": DEFAULT_AVOID,
+            "seeds": DEFAULT_SEEDS,
+        }
         targets_path.write_text(json.dumps(default_config, indent=2), encoding="utf-8")
-        seeds = [t["fqn"] for t in default_config["targets"] if t.get("fqn")]
-        return True, seeds, default_config["avoid"]
+        return DEFAULT_SEEDS, set(DEFAULT_AVOID), set(DEFAULT_RESERVED_STRUCTURAL)
 
     Logger.info(f"Reading target configuration from: {targets_path}")
     content = json.loads(targets_path.read_text(encoding="utf-8"))
-    enabled = bool(content.get("enabled", False))
-    seeds = [t["fqn"] for t in content.get("targets", []) if t.get("fqn")]
-    avoids = content.get("avoid", [])
 
-    Logger.info(f"Configuration loaded: enabled={enabled}, seeds={len(seeds)}, avoid={len(avoids)}")
-    return enabled, seeds, avoids
+    # seeds: new "seeds": [str,...]  OR  old "targets": [{"fqn": str}, ...]
+    if "seeds" in content:
+        raw_seeds = content["seeds"]
+        seeds = [s["fqn"] if isinstance(s, dict) else s for s in raw_seeds]
+    elif "targets" in content:
+        seeds = [t["fqn"] for t in content["targets"] if isinstance(t, dict) and t.get("fqn")]
+    else:
+        seeds = DEFAULT_SEEDS
+
+    avoids = set(DEFAULT_AVOID).union(set(content.get("avoid", [])))
+    reserved = set(content["reserved_structural"]) if "reserved_structural" in content else set(DEFAULT_RESERVED_STRUCTURAL)
+
+    if "enabled" in content:
+        Logger.info("Note: 'enabled' in targets.json is deprecated and ignored — "
+                     "seeds are now always unioned with the full-registry scan.")
+
+    Logger.info(f"Configuration loaded: seeds={len(seeds)}, avoid={len(avoids)}, reserved={len(reserved)}")
+    return seeds, avoids, reserved
 
 
 def build_fqn_normalizer(registry: Dict[str, Any]):
@@ -963,7 +1089,7 @@ def main() -> None:
 
     normalizer = build_fqn_normalizer(registry)
     targets_config_path = Path("05_5_abstract") / "targets.json"
-    filter_enabled, raw_seeds, raw_avoids = load_targets(targets_config_path)
+    raw_seeds, raw_avoids, raw_reserved = load_targets(targets_config_path)
 
     resolved_seeds: List[str] = []
     for raw in raw_seeds:
@@ -979,14 +1105,22 @@ def main() -> None:
         if norm:
             resolved_avoids.add(norm)
 
-    all_abstract_candidates = detect_abstract_classes(registry, resolved_seeds)
+    resolved_reserved: Set[str] = set()
+    for raw in raw_reserved:
+        norm = normalizer(raw)
+        resolved_reserved.add(norm if norm else raw)
 
-    if filter_enabled:
-        abstract_targets = [fqn for fqn in resolved_seeds if fqn in set(all_abstract_candidates)]
-        interface_targets = detect_interface_targets(registry, resolved_seeds)
-    else:
-        abstract_targets = [fqn for fqn in all_abstract_candidates if fqn not in resolved_avoids]
-        interface_targets = detect_interface_targets(registry, resolved_seeds)
+    all_abstract_candidates = detect_abstract_classes(registry, resolved_seeds, resolved_reserved)
+
+    abstract_targets: List[str] = []
+    for fqn in resolved_seeds:
+        if fqn in registry and fqn not in resolved_avoids:
+            abstract_targets.append(fqn)
+    for fqn in all_abstract_candidates:
+        if fqn not in resolved_avoids and fqn not in abstract_targets:
+            abstract_targets.append(fqn)
+
+    interface_targets = detect_interface_targets(registry, resolved_seeds)
 
     # Combine unique targets while preserving ordering
     combined_targets: List[str] = []
