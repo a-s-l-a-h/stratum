@@ -38,6 +38,16 @@ def sha256_record(name: str, data: bytes) -> str:
 
 
 INIT_PY = '''# Stratum Runtime Entry Point. Auto-generated. DO NOT EDIT.
+# Optional dynamic-mode class loader (see 08_pyi_emit --mode dynamic).
+# In a static-mode wheel (the default, unchanged pipeline) stratum/_dynamic.py
+# simply doesn't exist in the wheel, ImportError is swallowed, and nothing
+# below this block changes behavior at all.
+try:
+    from . import _dynamic as _stratum_dynamic
+    _stratum_dynamic.install()
+except ImportError:
+    pass
+
 from . import _stratum as _core
 from stratum.core.stratum_object import StratumObject
 import importlib
@@ -182,6 +192,12 @@ def main():
     ap.add_argument("--min-api", default="24")
     ap.add_argument("--abi", default="arm64-v8a")
     ap.add_argument("--chaquopy", default="3.12.0-0")
+    ap.add_argument("--include-pyi", choices=["yes", "no"], default="yes",
+                     help="yes (default, unchanged v9 behavior) packs .pyi stub "
+                          "files into the wheel too. no drops them from the "
+                          "runtime wheel (they're IDE-only, never imported at "
+                          "runtime) to shrink the .whl — use for production/"
+                          "release builds. Works with either Stage 08 --mode.")
     args = ap.parse_args()
 
     print("=" * 70)
@@ -217,13 +233,21 @@ def main():
         zf.writestr(so_info, so_data)
         records.append(sha256_record("stratum/_stratum.so", so_data))
 
+        allowed_suffixes = {".py"} if args.include_pyi == "no" else {".py", ".pyi"}
         for f in sorted(py_dir.rglob("*")):
-            if f.is_file() and f.suffix in (".py", ".pyi"):
-                rel = f.relative_to(py_dir)
-                entry = rel.as_posix()
-                data = f.read_bytes()
-                zf.writestr(entry, data)
-                records.append(sha256_record(entry, data))
+            if not f.is_file():
+                continue
+            # .py / .pyi as before (.pyi optionally dropped via --include-pyi no).
+            # _meta.json.gz is the new dynamic-mode metadata blob (08_pyi_emit
+            # --mode dynamic) — it has neither suffix, so it needs its own check.
+            is_meta_blob = f.name == "_meta.json.gz"
+            if f.suffix not in allowed_suffixes and not is_meta_blob:
+                continue
+            rel = f.relative_to(py_dir)
+            entry = rel.as_posix()
+            data = f.read_bytes()
+            zf.writestr(entry, data)
+            records.append(sha256_record(entry, data))
 
         wheel_meta = (
             f"Wheel-Version: 1.0\nGenerator: stratum\nRoot-Is-Purelib: false\n"
