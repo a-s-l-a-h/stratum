@@ -97,7 +97,7 @@ python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/ou
 
 
 # Project Directory Structure
-
+```
 stratum/
 ├── .gitignore
 ├── LICENSE
@@ -254,7 +254,7 @@ stratum/
             └── hiddenapi-flags.csv         # Placed manually from AOSP sources
                                             # (Optional: Used by Stage 04.5 to strip restricted/blocked APIs)
 
-
+```
 ---------------------------------------------------
 
 # Stratum 
