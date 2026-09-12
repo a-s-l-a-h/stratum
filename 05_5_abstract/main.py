@@ -942,7 +942,7 @@ def patch_class_json(data: Dict[str, Any], successfully_adapted: Set[str]) -> Di
 # Configuration & Targets Loader
 # =============================================================================
 
-def load_targets(targets_path: Path) -> Tuple[List[str], Set[str], Set[str]]:
+def load_targets(targets_path: Path) -> Tuple[List[str], Set[str], Set[str], bool]:
     """
     Load 05_5_abstract/targets.json — UNIFIED schema:
         { "reserved_structural": [...], "avoid": [...], "seeds": [...] }
@@ -967,7 +967,7 @@ def load_targets(targets_path: Path) -> Tuple[List[str], Set[str], Set[str]]:
             "seeds": DEFAULT_SEEDS,
         }
         targets_path.write_text(json.dumps(default_config, indent=2), encoding="utf-8")
-        return DEFAULT_SEEDS, set(DEFAULT_AVOID), set(DEFAULT_RESERVED_STRUCTURAL)
+        return DEFAULT_SEEDS, set(DEFAULT_AVOID), set(DEFAULT_RESERVED_STRUCTURAL), False
 
     Logger.info(f"Reading target configuration from: {targets_path}")
     content = json.loads(targets_path.read_text(encoding="utf-8"))
@@ -984,12 +984,13 @@ def load_targets(targets_path: Path) -> Tuple[List[str], Set[str], Set[str]]:
     avoids = set(DEFAULT_AVOID).union(set(content.get("avoid", [])))
     reserved = set(content["reserved_structural"]) if "reserved_structural" in content else set(DEFAULT_RESERVED_STRUCTURAL)
 
-    if "enabled" in content:
-        Logger.info("Note: 'enabled' in targets.json is deprecated and ignored — "
-                     "seeds are now always unioned with the full-registry scan.")
+    # Backward-compat: "enabled": true in an OLD-style file meant "seeds only".
+    # New key "seeds_only" is the explicit, forward-looking name for the same thing.
+    seeds_only = bool(content.get("seeds_only", content.get("enabled", False) and "targets" in content))
 
-    Logger.info(f"Configuration loaded: seeds={len(seeds)}, avoid={len(avoids)}, reserved={len(reserved)}")
-    return seeds, avoids, reserved
+    Logger.info(f"Configuration loaded: seeds={len(seeds)}, avoid={len(avoids)}, "
+                f"reserved={len(reserved)}, seeds_only={seeds_only}")
+    return seeds, avoids, reserved, seeds_only
 
 
 def build_fqn_normalizer(registry: Dict[str, Any]):
@@ -1089,7 +1090,7 @@ def main() -> None:
 
     normalizer = build_fqn_normalizer(registry)
     targets_config_path = Path("05_5_abstract") / "targets.json"
-    raw_seeds, raw_avoids, raw_reserved = load_targets(targets_config_path)
+    raw_seeds, raw_avoids, raw_reserved, seeds_only = load_targets(targets_config_path)
 
     resolved_seeds: List[str] = []
     for raw in raw_seeds:
@@ -1116,9 +1117,12 @@ def main() -> None:
     for fqn in resolved_seeds:
         if fqn in registry and fqn not in resolved_avoids:
             abstract_targets.append(fqn)
-    for fqn in all_abstract_candidates:
-        if fqn not in resolved_avoids and fqn not in abstract_targets:
-            abstract_targets.append(fqn)
+    if not seeds_only:
+        for fqn in all_abstract_candidates:
+            if fqn not in resolved_avoids and fqn not in abstract_targets:
+                abstract_targets.append(fqn)
+    else:
+        Logger.info("seeds_only=true: skipping full-registry abstract-class scan.")
 
     interface_targets = detect_interface_targets(registry, resolved_seeds)
 

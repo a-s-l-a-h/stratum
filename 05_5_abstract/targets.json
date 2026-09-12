@@ -1,4 +1,5 @@
 {
+  "seeds_only": false,
   "reserved_structural": [
     "android.view.View",
     "android.view.ViewGroup",
@@ -38,7 +39,27 @@
     "android.hardware.camera2.CameraDevice$StateCallback",
     "android.hardware.camera2.CameraCaptureSession$StateCallback",
     "android.hardware.camera2.CameraCaptureSession$CaptureCallback",
+    "android.view.TextureView$SurfaceTextureListener",
+    "android.view.SurfaceHolder$Callback",
+    "android.widget.SeekBar$OnSeekBarChangeListener",
+    "android.widget.AdapterView$OnItemSelectedListener",
+    "android.text.TextWatcher",
+    "android.content.DialogInterface$OnClickListener",
+    "android.content.DialogInterface$OnDismissListener",
+    "android.content.DialogInterface$OnCancelListener",
+    "android.hardware.SensorEventListener",
+    "android.location.LocationListener",
+    "android.location.GnssStatus$Callback",
+    "android.location.GnssMeasurementsEvent$Callback",
+    "android.media.ImageReader$OnImageAvailableListener",
+    "android.media.MediaRecorder$OnErrorListener",
+    "android.media.MediaPlayer$OnCompletionListener",
+    "android.media.MediaPlayer$OnErrorListener",
+    "android.media.MediaPlayer$OnPreparedListener",
+    "android.media.MediaPlayer$OnBufferingUpdateListener",
     "android.webkit.WebViewClient",
-    "android.webkit.WebChromeClient"
+    "android.webkit.WebChromeClient",
+    "android.webkit.ValueCallback",
+    "android.view.View$OnLongClickListener"
   ]
 }
