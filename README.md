@@ -28,7 +28,7 @@ Instead of generating thousands of bloated, redundant C++ wrapper classes and Na
 
 
 
-# Run commands for quick look 
+# Run commands for quick look
 
 # ── Stage 00: Setup & Validation ───────────────────────────────────────────
 python 00_setup/main.py --ndk-path third_party/ndk25/android-ndk-r25c --jar-path third_party/android-35.jar --api-version 35 --ndk-api 24 --chaquopy-version 3.10.13-0 --output 00_setup/output
@@ -46,12 +46,26 @@ python 03_javap/main.py --input 01_extract/output --targets 02_inspect/targets.j
 # ── Stage 04: Parse Disassembly to JSON ────────────────────────────────────
 python 04_parse/main.py --input 03_javap/output --output 04_parse/output
 
+# ── Stage 04.5 (OPTIONAL): JNI Safety Sanitizer ────────────────────────────
+# Pure filter — strips private/blocked members. Safe to skip entirely.
+# If you skip it: Stage 05 Pass 1 --input stays 04_parse/output (see below).
+python 04_5_sanitize/main.py --input 04_parse/output --output 04_5_sanitize/output --api-version 35 --strict
+# (add --strict to also drop restricted/unsupported/conditional hiddenapi members)
+# (add --min-sdk N to also drop members removed at/before API N)
+
 # ── Stage 05 (Pass 1): Initial Resolution ──────────────────────────────────
 # -> (Optional) Edit 05_resolve/targets.json
+#
+# WITHOUT Stage 04.5:
 python 05_resolve/main.py --input 04_parse/output --output 05_resolve/output
+#
+# WITH Stage 04.5:
+python 05_resolve/main.py --input 04_5_sanitize/output --output 05_resolve/output
 
 # ── Stage 05.5: Abstract & Interface Adapters Generation ───────────────────
 # -> (Optional) Edit 05_5_abstract/targets.json
+#    "seeds_only": false (default) = curated seeds + full-registry pattern scan
+#    "seeds_only": true            = ONLY the classes listed in "seeds"
 python 05_5_abstract/main.py --input 05_resolve/output --output 05_5_abstract/output --mode on
 # -> Copy 05_5_abstract/output/java/com/stratum/adapters/*.java into Android Studio: app/src/main/java/com/stratum/adapters/
 
@@ -75,9 +89,6 @@ python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/ou
 # -- Production build: one _meta.json.gz blob + loader, no .pyi -> smaller .whl --
 python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode dynamic
 python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --chaquopy 3.10.13-0 --include-pyi no
-
-
-
 
 
 
