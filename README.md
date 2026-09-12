@@ -91,8 +91,166 @@ python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emi
 python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --chaquopy 3.10.13-0 --include-pyi no
 
 
+--------------------------------------------------------------------
 
 
+# Project Directory Structure
+
+stratum/
+├── .gitignore
+├── LICENSE
+├── README.md
+├── PYTHON_API.md
+├── THIRD-PARTY-LICENSES.md
+│
+├── 00_setup/                               # Stage 00: Environment & Tooling Verification
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       └── setup_report.json               # Environment verification report & paths
+│
+├── 01_extract/                             # Stage 01: Android JAR Extraction
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       ├── android/                        # Mirrored extracted .class files
+│       │   └── ...
+│       └── extract_summary.json
+│
+├── 02_inspect/                             # Stage 02: Class Inspection & Target Configuration
+│   ├── README.md
+│   ├── main.py
+│   ├── targets.json                        # [Tracked] Pipeline targets & inclusion mode
+│   ├── target_jsons_pool/                  # Preset target configurations
+│   └── output/                             # [Generated]
+│       ├── available_classes.txt           # Flat list of all available Android FQNs
+│       └── available_by_package.txt        # Classes grouped by package hierarchy
+│
+├── 03_javap/                               # Stage 03: Javap Bytecode Extraction
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       ├── android/                        # Extracted .javap signatures per class
+│       │   └── ...
+│       └── javap_summary.json
+│
+├── 04_parse/                               # Stage 04: Signature & AST Parser
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       ├── android/                        # Parsed class JSON representations
+│       │   └── ...
+│       └── parse_summary.json
+│
+├── 04_5_sanitize/                          # Stage 04.5: Optional JNI Safety & Hidden API Filter
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       ├── android/                        # Stripped/sanitized class JSONs
+│       └── sanitize_summary.json
+│
+├── 05_resolve/                             # Stage 05: Slot Assignment & Type Resolution (Pass 1 & Pass 2)
+│   ├── README.md
+│   ├── main.py
+│   ├── targets.json                        # [Tracked] Closure & filter configuration
+│   ├── target_jsons_pool/
+│   ├── output/                             # [Generated - Pass 1] Used by Stage 05.5
+│   │   ├── android/
+│   │   └── resolve_summary.json
+│   └── output_patched/                     # [Generated - Pass 2] Feeds Stage 06 and Stage 08
+│       ├── android/
+│       └── resolve_summary.json
+│
+├── 05_5_abstract/                          # Stage 05.5: Abstract Class & Multi-Method Adapter Generator
+│   ├── README.md
+│   ├── main.py
+│   ├── targets.json                        # [Tracked] Abstract callback seeds & avoid list
+│   └── output/                             # [Generated]
+│       ├── java/
+│       │   └── com/stratum/adapters/       # Generated Java adapter source files (.java)
+│       │       └── Adapter_*.java
+│       ├── patched/                        # Patched JSONs containing adapter metadata
+│       └── manifest.json
+│
+├── 06_cpp_emit/                            # Stage 06: Universal Engine & Static Metadata Table Emit
+│   ├── README.md
+│   ├── main.py
+│   ├── engine_src/                         # [Tracked] Static C++ JNI bridge template source
+│   │   ├── bridge_core.h
+│   │   ├── bridge_core.cpp
+│   │   ├── bridge_main.cpp
+│   │   └── stratum_engine.cpp
+│   └── output/                             # [Generated]
+│       └── core/                           # Final compile-ready C++ bridge sources
+│           ├── bridge_core.h
+│           ├── bridge_core.cpp
+│           ├── bridge_main.cpp
+│           ├── stratum_engine.cpp
+│           ├── metadata_table.h            # Generated metadata definitions
+│           └── metadata_table.cpp          # Deduplicated string pool & slot lookup arrays
+│
+├── 07_build/                               # Stage 07: CMake + NDK Engine Compilation
+│   ├── README.md
+│   ├── main.py
+│   ├── templates/                          # [Tracked] CMake templates
+│   │   ├── CMakeLists.txt.tpl
+│   │   └── StratumInit.cmake.tpl
+│   └── output/                             # [Generated]
+│       ├── build/<abi>/                    # CMake / Ninja intermediate compilation artifacts
+│       ├── python-target/                  # Unpacked Chaquopy headers & libraries
+│       ├── CMakeLists.txt
+│       └── _stratum.so                     # Built native binary shared library
+│
+├── 08_pyi_emit/                            # Stage 08: Python Wrapper & Type Stub Generator
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       └── stratum/
+│           ├── __init__.py
+│           ├── core/
+│           │   ├── __init__.py
+│           │   └── stratum_object.py       # Core wrapper base class & lazy class resolver
+│           ├── _dynamic.py                 # (When --mode dynamic is used)
+│           ├── _meta.json.gz               # (When --mode dynamic is used)
+│           └── android/                    # (When --mode static is used)
+│               └── ... (.py and .pyi files per Android class)
+│
+├── 09_wheel/                               # Stage 09: Packaging
+│   ├── README.md
+│   ├── main.py
+│   └── output/                             # [Generated]
+│       └── stratum-<ver>-<pytag>-android_<minapi>_<abi>.whl  # Final installable Python wheel
+│
+├── runtime/                                # Runtime Java files (packaged into your Android app)
+│   ├── README.md
+│   └── java/
+│       └── com/stratum/runtime/
+│           ├── StratumActivity.java        # Android Activity managing Python lifecycle
+│           └── StratumInvocationHandler.java # Generic Java Proxy dispatch handler
+│
+└── third_party/                            # External Dependencies & Offline Metadata Caches
+    │
+    ├── nanobind/                           # [Auto-cloned by Stage 00 via git]
+    │   ├── CMakeLists.txt
+    │   ├── include/nanobind/nanobind.h
+    │   └── ext/robin_map/                  # Submodule initialized recursively
+    │
+    ├── chaquopy/                           # [Auto-downloaded by Stage 00 / Stage 07]
+    │   └── <version>/                      # e.g., 3.12.0-0/
+    │       ├── target-<version>-arm64-v8a.zip
+    │       ├── target-<version>-armeabi-v7a.zip
+    │       ├── target-<version>-x86_64.zip
+    │       └── target-<version>-x86.zip
+    │
+    ├── api_versions/                       # [Expected / User Placed - NOT in git]
+    │   └── <api-level>/                    # e.g., 35/
+    │       └── api-versions.xml            # Copy from: <Android-SDK>/platforms/android-<api>/data/api-versions.xml
+    │                                       # (Optional: Used by Stage 04.5 to tag sdk_since/deprecated/removed)
+    │
+    └── hiddenapi/                          # [Expected / User Placed - NOT in git]
+        └── <api-level>/                    # e.g., 35/
+            └── hiddenapi-flags.csv         # Placed manually from AOSP sources
+                                            # (Optional: Used by Stage 04.5 to strip restricted/blocked APIs)
 
 
 ---------------------------------------------------
