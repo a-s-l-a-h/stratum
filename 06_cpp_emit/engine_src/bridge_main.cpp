@@ -56,11 +56,19 @@ static void dispatch_lifecycle(const char* name) {
         try {
             fn();
         } catch (nb::python_error& e) {
-            LOGE("Lifecycle %s Python error: %s", name, e.what());
+            std::string err_msg = std::string("Stratum Lifecycle error in ") + name + ": " + e.what();
+            LOGE("%s", err_msg.c_str());
             e.restore();
-            PyErr_Clear();  // without this, CPython's per-thread error
-                             // indicator stays set and the NEXT unrelated
-                             // Python/C-API call on this thread fails
+            PyErr_Print();
+            PyErr_Clear();
+            JNIEnv* env = get_env();
+            if (env && !env->ExceptionCheck()) {
+                jclass rex = env->FindClass("java/lang/RuntimeException");
+                if (rex) {
+                    env->ThrowNew(rex, err_msg.c_str());
+                    env->DeleteLocalRef(rex);
+                }
+            }
         } catch (const std::exception& e) {
             LOGE("Lifecycle %s native error: %s", name, e.what());
         }

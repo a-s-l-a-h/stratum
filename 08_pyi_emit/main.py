@@ -252,9 +252,19 @@ def build_method_dispatcher(group: list, class_id: int) -> list:
                 lines.append(emit_call(overloads[0], indent="            "))
             else:
                 for ov in overloads:
-                    tag0 = ov["param_tags"][0] if ov["param_tags"] else "L"
-                    param0 = ov["params"][0] if ov.get("params") else {}
-                    cond = _overload_condition(tag0, param0)
+                    diff_idx = 0
+                    for idx in range(min(len(ov.get("params", [])), argc)):
+                        types_at_idx = {
+                            (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
+                            for other in overloads
+                            if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
+                        }
+                        if len(types_at_idx) > 1:
+                            diff_idx = idx
+                            break
+                    tag = ov["param_tags"][diff_idx] if diff_idx < len(ov.get("param_tags", "")) else "L"
+                    param = ov["params"][diff_idx] if diff_idx < len(ov.get("params", [])) else {}
+                    cond = _overload_condition(tag, param).replace("args[0]", f"args[{diff_idx}]")
                     lines.append(f"            if {cond}:")
                     lines.append(emit_call(ov, indent="                "))
 
@@ -368,14 +378,23 @@ def emit_python_class(data: dict) -> str:
                 lines.append("            super().__init__(_ptr=ptr)")
                 lines.append("            return")
             else:
-                # v9 FIX: multiple constructors share this argc (e.g.
-                # Handler(Callback) vs Handler(Looper)) — disambiguate by
-                # the first parameter's type instead of always calling
-                # whichever constructor happened to sort first.
+                # Disambiguate on the first argument index where these
+                # constructors' param tags actually differ, not always
+                # index 0 (same fix as build_method_dispatcher()).
                 for c in c_list:
-                    tag0 = c["param_tags"][0] if c.get("param_tags") else "L"
-                    param0 = c["params"][0] if c.get("params") else {}
-                    cond = _overload_condition(tag0, param0)
+                    diff_idx = 0
+                    for idx in range(min(len(c.get("params", [])), argc)):
+                        types_at_idx = {
+                            (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
+                            for other in c_list
+                            if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
+                        }
+                        if len(types_at_idx) > 1:
+                            diff_idx = idx
+                            break
+                    tag = c["param_tags"][diff_idx] if diff_idx < len(c.get("param_tags", "")) else "L"
+                    param = c["params"][diff_idx] if diff_idx < len(c.get("params", [])) else {}
+                    cond = _overload_condition(tag, param).replace("args[0]", f"args[{diff_idx}]")
                     slot = c["slot"]
                     lines.append(f"            if {cond}:")
                     lines.append(f"                ptr = _core.new_instance({class_id}, {slot}, *args)")
@@ -816,10 +835,22 @@ def _pick_overload(overloads, args, name="method"):
         raise TypeError(f"'{name}' takes argument count(s) {counts}, got {argc}")
     if len(candidates) == 1 or argc == 0:
         return candidates[0]
+    # Find the first argument index where these candidates' param tags
+    # actually differ, instead of always deciding on args[0].
+    diff_idx = 0
+    for idx in range(argc):
+        types_at_idx = {
+            (ov[1][idx], ov[2][idx])
+            for ov in candidates
+            if idx < len(ov[1]) and idx < len(ov[2])
+        }
+        if len(types_at_idx) > 1:
+            diff_idx = idx
+            break
     for ov in candidates:
-        tag0 = ov[1][0] if ov[1] else "L"
-        cid0 = ov[3][0] if ov[3] else None
-        if _matches(tag0, cid0, args[0]):
+        tag = ov[1][diff_idx] if diff_idx < len(ov[1]) else "L"
+        cid = ov[3][diff_idx] if diff_idx < len(ov[3]) else None
+        if _matches(tag, cid, args[diff_idx]):
             return ov
     return candidates[0]
 

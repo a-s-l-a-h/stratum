@@ -350,7 +350,7 @@ jobject stratum_py_to_java(JNIEnv* env, nb::handle obj, int depth) {
     // 3. Integer: Box into Integer (or Long if exceeding 32-bit range)
     if (nb::isinstance<nb::int_>(obj)) {
         int64_t v = nb::cast<int64_t>(obj);
-        if (v >= -2147483648LL && v <= 2147483647LL) {
+        if ((v >= -2147483648LL && v <= 2147483647LL) || (v >= 0 && v <= 4294967295LL)) {
             static jclass s_int_cls = nullptr;
             static jmethodID s_int_valueOf = nullptr;
             if (!s_int_cls) {
@@ -365,7 +365,7 @@ jobject stratum_py_to_java(JNIEnv* env, nb::handle obj, int depth) {
                 }
             }
             if (s_int_cls && s_int_valueOf) {
-                return env->CallStaticObjectMethod(s_int_cls, s_int_valueOf, (jint)v);
+                return env->CallStaticObjectMethod(s_int_cls, s_int_valueOf, (jint)(int32_t)(uint32_t)v);
             }
         } else {
             static jclass s_long_cls = nullptr;

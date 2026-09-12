@@ -197,7 +197,16 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 break;
             }
             case 'S': jargs[i].s = (jshort)nb::cast<int>(item); break;
-            case 'I': jargs[i].i = (jint)nb::cast<int32_t>(item); break;
+            case 'I': {
+                int64_t v = nb::cast<int64_t>(item);
+                if (v < -2147483648LL || v > 4294967295LL) {
+                    throw std::runtime_error(
+                        "Stratum: value " + std::to_string(v) +
+                        " exceeds 32-bit integer limits (did you mean to pass a 64-bit long?)");
+                }
+                jargs[i].i = (jint)(int32_t)(uint32_t)v;
+                break;
+            }
             case 'J': jargs[i].j = (jlong)nb::cast<int64_t>(item); break;
             case 'F': jargs[i].f = (jfloat)nb::cast<float>(item); break;
             case 'D': jargs[i].d = (jdouble)nb::cast<double>(item); break;
