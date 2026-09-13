@@ -775,7 +775,8 @@ nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args
                   s_long_arr_cls = nullptr, s_flt_arr_cls = nullptr,
                   s_dbl_arr_cls  = nullptr, s_bool_arr_cls = nullptr,
                   s_char_arr_cls = nullptr, s_short_arr_cls = nullptr;
-    if (!s_byte_arr_cls) {
+    static std::once_flag s_call_arr_flag;
+    std::call_once(s_call_arr_flag, [&]() {
         auto get_arr_cls = [&](const char* sig) {
             jclass c = env->FindClass(sig);
             jclass g = (jclass)env->NewGlobalRef(c);
@@ -790,7 +791,7 @@ nb::object call_arr(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args
         s_bool_arr_cls  = get_arr_cls("[Z");
         s_char_arr_cls  = get_arr_cls("[C");
         s_short_arr_cls = get_arr_cls("[S");
-    }
+    });
 
     // 1. byte[] -> return bytes
     if (env->IsInstanceOf(res, s_byte_arr_cls)) {
