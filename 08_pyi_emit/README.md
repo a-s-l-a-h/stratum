@@ -1,81 +1,69 @@
-# Stratum Pipeline — Stage 08: Emit Python Stubs (`.pyi`)
 
-## Quick Start
+# Stratum Pipeline — Stage 08: Python Wrapper & Stub Emitter
 
-**Standard Run (Works safely for all apps , Recommended for Stratum(v0.2))**
+## Overview
+
+Stage 08 (`08_pyi_emit/main.py`) generates the high-level Python API surface for Stratum. It supports two distinct generation modes:
+1. **Static Mode (`--mode static`)**: Generates individual `.py` modules and `.pyi` type stubs for every Java class (traditional, transparent, IDE-friendly).
+2. **Dynamic Mode (`--mode dynamic`)**: Compresses all class metadata into a single `_meta.json.gz` file and installs a custom Python import hook (`stratum._dynamic`). Classes are synthesized dynamically at runtime using `type()`. Produces extremely small wheels.
+
+Regardless of mode, application code (`import stratum.android.widget.Button as Button`) works identically.
+
+---
+
+## Core Components Emitted
+
+### 1. `stratum.core.stratum_object.StratumObject`
+The universal base class for all wrapped Java instances:
+* Holds `_ptr`: an integer representing a JNI `jobject` global reference.
+* Memory management: In `__del__`, automatically removes associated callbacks and invokes `_core.delete_ref(self._ptr)`.
+* Implements rich comparison (`__eq__`, `__ne__`) using JNI `IsSameObject`.
+* Implements `__hash__`, `__str__`, and `__repr__` backed by real Java `hashCode()` and `toString()`.
+* **Safe Downcasting**: `Class.from_ptr(ptr_or_obj)` verifies instance inheritance via JNI `IsInstanceOf` before casting.
+
+### 2. Resilient Lazy Resolution (`_get_parent_class` & `_wrap_instance`)
+Generated code never imports parent or return-type classes eagerly at module load time. Instead, it uses lazy helpers:
+* If a class was excluded from the build via `targets.json`, the import hook catches `ModuleNotFoundError` and safely falls back to `StratumObject` without crashing.
+* Any other genuine error (e.g. syntax error or circular dependency) logs an explicit warning to `stderr` once and caches the failure.
+
+### 3. Overload Disambiguation Algorithm
+When a Java method has multiple overloads under the same name, the generated dispatcher groups them by argument count (`argc`), and disambiguates between same-arity overloads by checking the first differing parameter:
+* Distinguishes `bool` from `int` (handling Python's `isinstance(True, int) == True` quirk).
+* Distinguishes boxed wrapper types (`java.lang.Integer`, `java.lang.Boolean`).
+* Distinguishes arrays, `str`, `dict`, and `list`.
+* For arbitrary Java object parameters, checks type compatibility against `_target_class_id` using JNI `is_instance_of`.
+
+### 4. Field Accessors & Camel/Snake Aliases
+* Methods are generated with both their native Java name (`setText`) and PEP 8 snake_case alias (`set_text`).
+* Static fields: `sf_get_<name>()`, `sf_set_<name>(val)`.
+* Instance fields: `f_get_<name>()`, `f_set_<name>(val)`.
+
+---
+
+## CLI Options
+
+| Argument | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--input` | **Yes** | — | Path to Stage 05 Pass 2 output (`05_resolve/output_patched/`). |
+| `--output` | **Yes** | — | Target destination (`08_pyi_emit/output/`). |
+| `--mode` | No | `static` | `static` emits per-class `.py`/`.pyi` files; `dynamic` emits `_meta.json.gz` + `_dynamic.py`. |
+
+---
+
+## Command Line Examples
+
+### Generate Full Static Stubs (Standard):
 ```bash
-python 08_pyi_emit/main.py --input "05_resolve/output/" --output "08_pyi_emit/output/"
+python 08_pyi_emit/main.py \
+    --input 05_resolve/output_patched \
+    --output 08_pyi_emit/output \
+    --mode static
 ```
 
-**Patched Run (Recommended if you ran Stage 05.5)**
+### Generate Dynamic Compact Metadata (Small Footprint):
 ```bash
-python 08_pyi_emit/main.py --input "05_5_abstract/output/patched/" --output "08_pyi_emit/output/"
+python 08_pyi_emit/main.py \
+    --input 05_resolve/output_patched \
+    --output 08_pyi_emit/output \
+    --mode dynamic
 ```
-
-> **Good to know:** If you ran Stage 05.5 but accidentally use the standard `05_resolve` input here, **it will not cause any pipeline errors or crashes.** The script will still generate perfectly valid `.pyi` files. However, using the `patched/` folder is recommended because it ensures your IDE's autocomplete perfectly matches the specific Callback Adapters generated in Stage 05.5.
-
----
-
-## What This Stage Does
-
-Stage 08 generates Python stub files (`.pyi`). While the C++ generated in Stage 06 provides the actual *runtime* behavior, Python IDEs (like VSCode or PyCharm) cannot read C++ `.so` files to give you autocomplete.
-
-This stage translates the Java class definitions into valid Python type-hints. When you type `activity.findViewBy...` in your Python code, your IDE will know exactly what methods exist, what arguments they take, and what they return, because it reads the `.pyi` files generated here.
-
----
-
-## Command-Line Arguments
-
-| Argument | Required | Description |
-|---|---|---|
-| `--input` | ✅ Yes | Path to the JSON ASTs. Use `05_resolve/output/` generally, or `05_5_abstract/output/patched/` for highest accuracy if using callbacks. |
-| `--output` | ✅ Yes | Directory where the `.pyi` files and `__init__.pyi` packages will be written. |
-
----
-
-## Key Features & Transformations
-
-1. **Inner-Class Sanitization:** Java uses `$` for inner classes (e.g., `LinearLayout$LayoutParams`). This stage automatically sanitizes them to underscores (`LinearLayout_LayoutParams`) so they are valid Python identifiers.
-2. **Method Overload Deduplication:** If a Java class has multiple constructors or overloaded methods (e.g., `inflate(int)` and `inflate(int, ViewGroup)`), Stage 08 safely wraps them using Python's `@overload` typing decorator.
-3. **Field Accessors:** Exposes Java `public static final` fields as Python class methods (e.g., `Color.f_get_BLACK()`).
-4. **Inherited Methods:** It emits inherited methods directly into the child stub as comments or method signatures. This ensures your IDE knows a `Button` has `setVisibility()` because it inherited it from `View`.
-
----
-
-## Output Structure
-
-The output mirrors the standard Android Java package structure, but as Python modules:
-
-```text
-08_pyi_emit/output/
-├── pyi_summary.json
-└── android/
-    ├── __init__.pyi
-    ├── app/
-    │   ├── __init__.pyi
-    │   └── Activity.pyi
-    ├── widget/
-    │   ├── __init__.pyi
-    └── Button.pyi
-```
-
-Inside `Button.pyi`, you will see pure Python typing:
-```python
-from stratum.android.widget.TextView import TextView
-
-class Button(TextView):
-    def __init__(self, context: 'Context') -> None: ...
-    def setText(self, text: str) -> None: ...
-    def _get_jobject_ptr(self) -> int: ...
-```
-
----
-
-## Exit Behaviour & Next Steps
-
-| Result | Exit Code | Description |
-|---|---|---|
-| Success | `0` | `.pyi` files generated safely. Proceed to Stage 09. |
-| Missing Input | `1` | The `--input` path is incorrect or missing. |
-
-**Next Step:** Proceed to the final stage, Stage 09 (Wheel Build), to package the `.so` and `.pyi` files together.

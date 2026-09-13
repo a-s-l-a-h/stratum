@@ -1,107 +1,153 @@
-# Stratum Pipeline — Stage 05: Resolve
 
-## Quick Start
+# Stratum Pipeline — Stage 05: Resolve & Slot Assignment
 
-```bash
-python 05_resolve/main.py --input "04_parse/output/" --output "05_resolve/output/"
+## Overview
+
+Stage 05 (`05_resolve/main.py`) is the deterministic indexing and layout engine of Stratum. It translates high-level Java class descriptions (from Stage 04 parse or Stage 04.5 sanitize) into a fixed, indexed slot layout where every class has an integer `class_id` (`0..N-1`) and every constructor, method, and field is assigned a zero-indexed `slot` (`0..M-1`).
+
+By precomputing parameter encoding tags (`param_tags`), return type identifiers (`ret_type_id`), and adapter class signatures ahead of time, Stage 05 eliminates all runtime JNI descriptor parsing in the C++ engine.
+
+---
+
+## The Critical Two-Pass Architecture
+
+Stage 05 is run **twice** during a full pipeline build. **Never skip Pass 1 or combine the two passes.**
+
+```
+[04_parse or 04_5_sanitize]
+            │
+            ▼
+┌──────────────────────┐
+│ 05_resolve (Pass 1)  │ ──► Writes: 05_resolve/output/
+└──────────────────────┘
+            │
+            ▼
+┌──────────────────────┐
+│ 05_5_abstract        │ ──► Emits Java adapters (.java)
+└──────────────────────┘     Patches JSON: 05_5_abstract/output/patched/
+            │
+            ▼
+┌──────────────────────┐
+│ 05_resolve (Pass 2)  │ ──► Writes: 05_resolve/output_patched/
+└──────────────────────┘
+            │
+            ├──► Feeds 06_cpp_emit (metadata_table.cpp)
+            └──► Feeds 08_pyi_emit (stratum.android.* wrappers)
 ```
 
----
-
-## What This Stage Does
-
-Stage 05 is the data-enrichment phase. It reads the isolated ASTs generated in Stage 04 and connects them into a complete class hierarchy. 
-
-It calculates the Method Resolution Order (MRO), resolves inherited and overridden methods from parent classes, determines C++ `#include` requirements, and pre-computes the exact JNI mangled names and C++ types needed by Stage 06.
-
-Crucially, Stage 05 acts as the **filter**. It reads `05_resolve/targets.json` to compute a "closure" — taking your seed classes and automatically pulling in any parent classes required to make the C++ compile safely.
+1. **Pass 1 (`04_parse/output/` ➔ `05_resolve/output/`)**:
+   Produces an initial deterministic slot assignment and closure indexing so that Stage 05.5 has a normalized schema to inspect for abstract classes and callback interfaces.
+2. **Pass 2 (`05_5_abstract/output/patched/` ➔ `05_resolve/output_patched/`)**:
+   Processes the patched JSONs where callback parameters now carry `needs_adapter: true` and `adapter_jni`. Pass 2 converts these into `'a'` (abstract adapter) or `'p'` (dynamic proxy) tags and embeds the adapter JNI paths directly into method records. **Stage 06 and Stage 08 consume Pass 2 output.**
 
 ---
 
-## Command-Line Arguments
+## Internal Mechanisms
 
-| Argument | Required | Description |
-|---|---|---|
-| `--input` | ✅ Yes | Path to Stage 04's output directory (`04_parse/output/`). |
-| `--output` | ✅ Yes | Directory where the fully-enriched `.json` files and `resolve_summary.json` will be written. |
-| `--closure-mode` | No | Overrides the `closure_mode` defined in `targets.json`. |
-| `--list-modes` | No | Prints a detailed explanation of closure modes and exits. |
+### 1. Deterministic Method & Field Ordering
+To ensure that C++ metadata tables and Python wrapper dispatchers match identically without inter-process communication, methods and fields are sorted deterministically:
+* **Constructors**: Sorted alphabetically by `jni_signature`.
+* **Methods**: Sorted by `(name, jni_signature)`.
+* Constructors occupy slots `0..K-1`; normal methods occupy slots `K..M-1`.
+* **Fields**: Sorted by declaration order as parsed from bytecode.
+
+### 2. Parameter Tag Encoding Table (`param_tags`)
+Every method has a precomputed string of single-character tags matching its parameter list. The C++ engine’s `pack_arguments()` switch statement and Python’s overload dispatcher rely strictly on this table:
+
+| Tag | Java Type / Equivalent | Input Type Expected from Python | C++ Conversion Handling |
+| :---: | :--- | :--- | :--- |
+| `Z` | `boolean` | `bool` | `jvalue.z = JNI_TRUE/FALSE` |
+| `B` | `byte` | `int` | `jvalue.b = (jbyte)val` |
+| `C` | `char` | `str` (1 char) or `int` | Decodes UTF-8 codepoint to `jchar` |
+| `S` | `short` | `int` | `jvalue.s = (jshort)val` |
+| `I` | `int` | `int` | `jvalue.i = (jint)val` (range-checked) |
+| `J` | `long` | `int` | `jvalue.j = (jlong)val` |
+| `F` | `float` | `float` | `jvalue.f = (jfloat)val` |
+| `D` | `double` | `float` | `jvalue.d = (jdouble)val` |
+| `s` | `String`, `CharSequence` | `str` / `None` | UTF-8 ➔ UTF-16 `jstring` |
+| `[` | `byte[]` | `bytes`, `bytearray`, `memoryview` | Direct buffer or `SetByteArrayRegion` |
+| `]` | `int[]` | `list[int]` or `tuple[int]` | `SetIntArrayRegion` |
+| `q` | `long[]` | `list[int]` | `SetLongArrayRegion` |
+| `f` | `float[]` | `list[float]` | `SetFloatArrayRegion` |
+| `d` | `double[]` | `list[float]` | `SetDoubleArrayRegion` |
+| `b` | `boolean[]` | `list[bool]` | `SetBooleanArrayRegion` |
+| `c` | `char[]` | `list[str\|int]` | Encoded to `jcharArray` |
+| `h` | `short[]` | `list[int]` | `SetShortArrayRegion` |
+| `T` | `String[]` | `list[str]` | `NewObjectArray` of `java.lang.String` |
+| `A` | `Object[]` (or any typed object array) | `list[StratumObject\|str\|None]` | `NewObjectArray` of `java.lang.Object` |
+| `M` | `java.util.List`, `Collection`, `Iterable` | `list`, `tuple`, `set` | Instantiates `java.util.ArrayList` |
+| `N` | `java.util.Map` | `dict` | Instantiates `java.util.HashMap` |
+| `a` | Abstract class / Callback Adapter | `callable` or `dict` | Instantiates `com.stratum.adapters.Adapter_*` |
+| `p` | Dynamic Interface Proxy | `callable` or `dict` | Instantiates `java.lang.reflect.Proxy` |
+| `L` | Boxed types, arbitrary Java objects | `StratumObject`, primitive, or `None` | Auto-boxes primitives; passes raw pointer |
+
+### 3. Return Type Identifiers (`ret_type_id`)
+Determines which JNI `Call<Type>MethodA` / `Get<Type>Field` function is invoked:
+
+| `ret_type_id` | Native Return Type | JNI Call Dispatched | Python Wrapper Conversion |
+| :---: | :--- | :--- | :--- |
+| `0` | `void` | `CallVoidMethodA` | Returns `None` |
+| `1` | `jboolean` | `CallBooleanMethodA` | Returns `bool` |
+| `2` | `jbyte` | `CallByteMethodA` | Returns `int` |
+| `3` | `jchar` | `CallCharMethodA` | Returns `int` |
+| `4` | `jshort` | `CallShortMethodA` | Returns `int` |
+| `5` | `jint` | `CallIntMethodA` | Returns `int` |
+| `6` | `jlong` | `CallLongMethodA` | Returns `int` |
+| `7` | `jfloat` | `CallFloatMethodA` | Returns `float` |
+| `8` | `jdouble` | `CallDoubleMethodA` | Returns `float` |
+| `9` | `jstring` | `CallObjectMethodA` | Converts UTF-16 ➔ Python `str` |
+| `10` | `jobject` | `CallObjectMethodA` | Returns global ref wrapped in `StratumObject` |
+| `11` | Array types (`[B`, `[I`, `Object[]`) | `CallObjectMethodA` | Native list/bytes via `call_arr` |
+| `12` | `java.util.List` / `Collection` | `CallObjectMethodA` | Recursive Python `list` via `call_list` |
+| `13` | `java.util.Map` | `CallObjectMethodA` | Recursive Python `dict` via `call_map` |
 
 ---
 
-## Configuration: `05_resolve/targets.json`
+## Configuration (`05_resolve/targets.json`)
 
-On the first run, Stage 05 creates `05_resolve/targets.json`. This controls which classes are included in the final C++ generation.
-
-### The `closure_mode` Setting
-
-Because C++ structs inherit from one another (e.g., `Button` inherits from `TextView`, which inherits from `View`), you cannot generate C++ for `Button` without also generating C++ for `TextView` and `View`. The `closure_mode` handles this automatically.
-
-*   `"parents_only"` **(Recommended)**: Pulls in only parent/ancestor classes. Safe, fast, and generates small binaries (~30-50 classes). Use this for simple UI apps.
-*   `"parents_and_interfaces"`: Pulls in parents AND directly-implemented interfaces. Use this if your app relies on Java Callbacks/Listeners (like Camera or Surface processing).
-*   `"full"`: **(Warning)** Pulls in everything, including method return types. Can explode 8 seeds into 800+ classes and cause runtime crashes or other crashes.
-
----
-
-### Example 1: Basic App (Counter)
-If you are building a simple app (like a counter), use `"parents_only"`. 
+If `targets.json` exists in `05_resolve/`, filtering and dependency closure resolution can be applied:
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "closure_mode": "parents_only",
   "targets": [
     { "fqn": "android.app.Activity" },
-    { "fqn": "android.view.ContextThemeWrapper" },
-    { "fqn": "android.content.ContextWrapper" },
-    { "fqn": "android.content.Context" },
-    { "fqn": "android.view.View" },
-    { "fqn": "android.view.ViewGroup" },
-    { "fqn": "android.widget.TextView" },
-    { "fqn": "android.widget.Button" },
-    { "fqn": "android.widget.LinearLayout" }
+    { "fqn": "android.view.View" }
   ]
 }
 ```
 
-### Example 2: Advanced App (OpenCV / Camera)
-If you are using Hardware Cameras, Surfaces, and Listeners, you need `"parents_and_interfaces"` so the C++ generator understands the listener interfaces. Note the use of `$` for inner classes (e.g., `View$OnClickListener`).
-
-```json
-{
-  "enabled": true,
-  "closure_mode": "parents_and_interfaces",
-  "targets": [
-    { "fqn": "android.app.Activity" },
-    { "fqn": "android.content.Context" },
-    { "fqn": "android.view.View" },
-    { "fqn": "android.view.View$OnClickListener" },
-    { "fqn": "android.view.ViewGroup" },
-    { "fqn": "android.widget.FrameLayout" },
-    { "fqn": "android.widget.LinearLayout" },
-    { "fqn": "android.widget.Button" },
-    { "fqn": "android.graphics.Bitmap" },
-    { "fqn": "android.view.TextureView" },
-    { "fqn": "android.view.TextureView$SurfaceTextureListener" },
-    { "fqn": "android.hardware.camera2.CameraManager" },
-    { "fqn": "android.hardware.camera2.CameraDevice" },
-    { "fqn": "android.hardware.camera2.CameraDevice$StateCallback" },
-    { "fqn": "android.hardware.camera2.CameraCaptureSession" },
-    { "fqn": "android.hardware.camera2.CameraCaptureSession$StateCallback" },
-    { "fqn": "android.hardware.camera2.CaptureRequest" }
-  ]
-}
-```
+* `enabled`: When `true`, processes only the seed classes and their computed closure. When `false`, processes every class in the input directory.
+* `closure_mode`:
+  * `"parents_only"`: Includes the target class and all its superclasses up to `java.lang.Object`.
+  * `"parents_and_interfaces"`: Includes superclasses and implemented interfaces.
+  * `"full"`: Includes superclasses, interfaces, method parameter types, and return types.
 
 ---
 
-## Exit Behaviour & Next Steps
+## CLI Options
 
-If validation fails (e.g., missing JNI signatures), the script will prompt you in the terminal to either Stop `[S]`, Continue `[C]`, or Continue All `[A]`.
+| Argument | Required | Description |
+| :--- | :---: | :--- |
+| `--input` | **Yes** | Path to input directory (`04_parse/output/` on Pass 1, `05_5_abstract/output/patched/` on Pass 2). |
+| `--output` | **Yes** | Destination directory (`05_resolve/output/` on Pass 1, `05_resolve/output_patched/` on Pass 2). |
+| `--closure-mode` | No | Overrides `closure_mode` in `targets.json` (`parents_only`, `parents_and_interfaces`, `full`). |
 
-**Where do I go next?**
-*   **Path A (Simple Apps):** If your app does not require implementing Java interfaces or abstract classes in Python (like Example 1 above), **skip Stage 05.5** and go directly to Stage 06 using `--input "05_resolve/output/"`.
-*   **Path B (Advanced Apps):** If you need to pass Python functions into Android as Callbacks/Listeners (like Example 2 above), **proceed to Stage 05.5**.
+---
 
-***
-***
+## Command Line Examples
+
+### Run Pass 1 (Initial index for Stage 05.5):
+```bash
+python 05_resolve/main.py \
+    --input 04_parse/output \
+    --output 05_resolve/output
+```
+
+### Run Pass 2 (Final index post-adapter patching):
+```bash
+python 05_resolve/main.py \
+    --input 05_5_abstract/output/patched \
+    --output 05_resolve/output_patched
+```
