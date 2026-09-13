@@ -194,6 +194,19 @@ def compute_param_tags(params: list) -> str:
         elif p.get("is_array", False) or java_type.startswith("[") or jni_type == "jobjectArray":
             tags.append("A")
 
+        # ── Boxed primitive wrapper types (java.lang.Integer, Boolean, ...)
+        # used AS A PARAMETER TYPE must never get a primitive tag letter.
+        # map_object_type() reuses the boxed type's raw primitive jni_type
+        # (e.g. "jint") for descriptor purposes, but the actual JNI slot is
+        # Ljava/lang/Integer; -- an object. Tagging it 'I' would write into
+        # jvalue.i while CallXXXMethodA reads jvalue.l for that slot: union
+        # corruption, undefined behavior, likely native crash. The default
+        # 'L' path already auto-boxes Python int/bool/float correctly via
+        # stratum_py_to_java(). Hits real APIs like
+        # ContentValues.put(String, Integer).
+        elif p.get("is_boxed", False):
+            tags.append("L")
+
         # ── Plain primitives ─────────────────────────────────────────────
         else:
             primitive = {

@@ -404,7 +404,7 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                 break;
             }
 
-            // ── v9 FIX 3: generic Object[] (Surface[], Object[], etc.) ──
+            // ── v9 FIX 3 / v10 FIX: generic Object[] (Surface[], Object[], etc.) ──
             case 'A': {
                 if (item.is_none()) jargs[i].l = nullptr;
                 else if (nb::isinstance<nb::list>(item) || nb::isinstance<nb::tuple>(item)) {
@@ -422,6 +422,15 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                             env->DeleteLocalRef(js);
                         } else if (nb::hasattr(elem, "_ptr")) {
                             env->SetObjectArrayElement(ja, k, (jobject)(uintptr_t)nb::cast<int64_t>(elem.attr("_ptr")));
+                        } else {
+                            // v10 FIX: any other element (int, float, bool,
+                            // bytes, dict, nested list) previously left this
+                            // slot as Java null. Box it properly -- this is
+                            // what makes String.format(fmt, 42, true, 3.14)
+                            // and similar varargs/Object[] APIs actually work.
+                            jobject boxed = stratum_py_to_java(env, elem);
+                            env->SetObjectArrayElement(ja, k, boxed);
+                            if (boxed) env->DeleteLocalRef(boxed);
                         }
                     }
                     jargs[i].l = ja; locals.push_back(ja);
@@ -475,7 +484,14 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     break;
                 }
                 static std::atomic<uint64_t> s_aid{0};
-                std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_a_") : "adapter_") + std::to_string(++s_aid);
+                std::string key;
+                if (caller_ptr) {
+                    key = "obj_" + std::to_string(caller_ptr) + "_a_" + std::to_string(++s_aid);
+                } else {
+                    // v10 FIX: unambiguous, self-contained key -- see
+                    // track_ctor_callback_keys() in bridge_core.cpp.
+                    key = "ctorcb_a_" + std::to_string(++s_aid);
+                }
                 if (!caller_ptr && t_ctor_callback_keys) t_ctor_callback_keys->push_back(key);
                 if (nb::isinstance<nb::callable>(item)) {
                     store_callback(key, nb::cast<nb::callable>(item));
@@ -506,7 +522,12 @@ static inline void pack_arguments(JNIEnv* env, const char* tags, const MethodMet
                     break;
                 }
                 static std::atomic<uint64_t> s_pid{0};
-                std::string key = (caller_ptr ? ("obj_" + std::to_string(caller_ptr) + "_p_") : "proxy_") + std::to_string(++s_pid);
+                std::string key;
+                if (caller_ptr) {
+                    key = "obj_" + std::to_string(caller_ptr) + "_p_" + std::to_string(++s_pid);
+                } else {
+                    key = "ctorcb_p_" + std::to_string(++s_pid);
+                }
                 if (!caller_ptr && t_ctor_callback_keys) t_ctor_callback_keys->push_back(key);
                 if (nb::isinstance<nb::callable>(item)) {
                     store_callback(key, nb::cast<nb::callable>(item));
@@ -929,6 +950,29 @@ nb::object call_map(int64_t ptr, uint32_t class_id, uint32_t slot, nb::args args
     return result;
 }
 
+// v10.1 FIX: RAII guard for t_ctor_callback_keys. Without this, an
+// exception thrown out of pack_arguments() (argument-count mismatch,
+// OOM allocating an array, a bad boxed value, etc.) skips the plain
+// "t_ctor_callback_keys = nullptr;" reset that used to sit right after
+// the call. Because t_ctor_callback_keys is static thread_local, it
+// would keep pointing at the now-destroyed stack std::vector<string>
+// ctor_keys. The NEXT 'a'/'p' constructor-callback argument packed on
+// that same thread (any time later, any other object) then does
+// t_ctor_callback_keys->push_back(key) on a dangling pointer --
+// undefined behavior, and a native crash that is nearly impossible to
+// trace back to the original failed constructor call. The destructor
+// here is guaranteed to run on every exit path, including exceptions.
+struct CtorKeyScope {
+    explicit CtorKeyScope(std::vector<std::string>* vec) {
+        t_ctor_callback_keys = vec;
+    }
+    ~CtorKeyScope() {
+        t_ctor_callback_keys = nullptr;
+    }
+    CtorKeyScope(const CtorKeyScope&) = delete;
+    CtorKeyScope& operator=(const CtorKeyScope&) = delete;
+};
+
 int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     JNIEnv* env = get_env();
     if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
@@ -939,11 +983,12 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     if (!mid) throw std::runtime_error("Stratum: Constructor unavailable on this device API level");
 
     std::vector<std::string> ctor_keys;
-    t_ctor_callback_keys = &ctor_keys;
     jvalue jargs[32] = {};
     std::vector<jobject> locals;
-    pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals);
-    t_ctor_callback_keys = nullptr;
+    {
+        CtorKeyScope key_guard(&ctor_keys);
+        pack_arguments(env, get_str(cls.methods[slot].tags_offset), cls.methods[slot], args, jargs, locals);
+    } // key_guard resets t_ctor_callback_keys to nullptr here, even on throw
 
     jobject obj;
     {
@@ -958,10 +1003,17 @@ int64_t new_instance(uint32_t class_id, uint32_t slot, nb::args args) {
     int64_t new_ptr = (int64_t)(uintptr_t)gref;
 
     for (const std::string& old_key : ctor_keys) {
-        size_t us1 = old_key.find('_');
-        size_t us2 = old_key.find('_', us1 + 1);
-        std::string rest = (us2 != std::string::npos) ? old_key.substr(us2) : "";
-        rekey_callback(old_key, "obj_" + std::to_string(new_ptr) + rest);
+        // v10 FIX: old_key is now always "ctorcb_a_<uid>" or
+        // "ctorcb_p_<uid>" -- already globally unique, so just nest it
+        // under the new object's prefix rather than splicing a suffix
+        // out with fragile find()/substr() position math (which broke
+        // whenever the old-style key had no further '_' in it, causing
+        // multiple constructor callbacks to collide onto one key).
+        std::string new_key = "obj_" + std::to_string(new_ptr) + "_" + old_key;
+        rekey_callback(old_key, new_key);
+    }
+    if (!ctor_keys.empty()) {
+        track_ctor_callback_keys(new_ptr, ctor_keys);
     }
     return new_ptr;
 }
@@ -977,6 +1029,9 @@ void delete_ref(int64_t ptr) {
     if (!ptr) return;
     // Automatically clear any callbacks associated with this object prefix
     remove_callbacks_by_prefix("obj_" + std::to_string(ptr) + "_");
+    // v10 FIX: also free the ORIGINAL constructor-time callback key(s),
+    // which the prefix scan above can never match.
+    release_ctor_callback_keys(ptr);
     JNIEnv* env = get_env();
     if (env) {
         env->DeleteGlobalRef((jobject)(uintptr_t)ptr);

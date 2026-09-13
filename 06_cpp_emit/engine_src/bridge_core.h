@@ -85,6 +85,11 @@ size_t       remove_callbacks_by_prefix(const std::string& prefix);
 size_t       stratum_callback_count();
 void rekey_callback(const std::string& old_key, const std::string& new_key);
 
+// v10 FIX: tracks the ORIGINAL constructor-time callback key(s), indexed
+// by owning object pointer. See bridge_core.cpp for why this is required.
+void         track_ctor_callback_keys(int64_t obj_ptr, const std::vector<std::string>& keys);
+void         release_ctor_callback_keys(int64_t obj_ptr);
+
 // Object inspection & downcast verification
 bool         is_instance_of(int64_t ptr, uint32_t class_id);
 std::string  object_to_string(int64_t ptr);

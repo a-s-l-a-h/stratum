@@ -481,6 +481,33 @@ def create_stratum_view(key: str):
     from stratum.core.stratum_object import _wrap_instance
     return _wrap_instance(ptr, "android.view.View")
 
+_main_handler = None
+
+def run_on_ui_thread(fn, *args, **kwargs) -> None:
+    """Posts a callable to Android's Main Looper (UI thread). Required
+    before touching any View from a background thread, timer, sensor
+    callback, or network response -- Android throws
+    CalledFromWrongThreadException otherwise. Lazily imports
+    android.os.Handler/Looper, so this costs nothing if never called."""
+    global _main_handler
+    if _main_handler is None:
+        from stratum.android.os.Handler import Handler
+        from stratum.android.os.Looper import Looper
+        _main_handler = Handler(Looper.getMainLooper())
+
+    def _runner():
+        fn(*args, **kwargs)
+
+    _main_handler.post(_runner)
+
+
+def ui_thread(fn):
+    """Decorator: always runs the wrapped function on the Android UI thread."""
+    def wrapper(*args, **kwargs):
+        run_on_ui_thread(fn, *args, **kwargs)
+    return wrapper
+
+
 
 def set_log_enabled(enabled: bool) -> None:
     """Toggle runtime logging. Only has any effect if this .so was
@@ -488,6 +515,7 @@ def set_log_enabled(enabled: bool) -> None:
     strips all logging code at compile time, so this call is a silent
     no-op on a production build."""
     _core.set_log_enabled(enabled)
+
 
 
 def _auto_register_lifecycle() -> None:

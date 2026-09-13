@@ -23,6 +23,16 @@ std::unordered_map<std::string, std::shared_ptr<nb::callable>> g_callbacks;
 std::recursive_mutex g_callback_mutex;
 std::mutex g_activity_mutex;
 
+// v10 FIX: rekey_callback() aliases a constructor-time key under
+// "obj_<ptr>_..." for prefix-based bulk cleanup, but deliberately never
+// erases the ORIGINAL key -- the Java adapter's `key_` field has it baked
+// in permanently and nativeDispatch() always falls back to looking it up
+// by that exact string. Without this map, the original key had no path
+// to ever being freed: one leaked shared_ptr<nb::callable> per
+// constructor-time callback, forever.
+std::unordered_map<int64_t, std::vector<std::string>> g_ctor_original_keys;
+std::mutex g_ctor_keys_mutex;
+
 static pthread_key_t  g_jni_detach_key;
 static pthread_once_t g_jni_key_once = PTHREAD_ONCE_INIT;
 static void detach_thread(void*) { if (g_jvm) g_jvm->DetachCurrentThread(); }
@@ -136,6 +146,30 @@ size_t remove_callbacks_by_prefix(const std::string& prefix) {
     }
     LOGD("remove_callbacks_by_prefix '%s' removed %zu", prefix.c_str(), removed);
     return removed;
+}
+
+void track_ctor_callback_keys(int64_t obj_ptr, const std::vector<std::string>& keys) {
+    if (!obj_ptr || keys.empty()) return;
+    std::lock_guard<std::mutex> lk(g_ctor_keys_mutex);
+    auto& vec = g_ctor_original_keys[obj_ptr];
+    vec.insert(vec.end(), keys.begin(), keys.end());
+}
+
+void release_ctor_callback_keys(int64_t obj_ptr) {
+    std::vector<std::string> keys;
+    {
+        std::lock_guard<std::mutex> lk(g_ctor_keys_mutex);
+        auto it = g_ctor_original_keys.find(obj_ptr);
+        if (it == g_ctor_original_keys.end()) return;
+        keys = std::move(it->second);
+        g_ctor_original_keys.erase(it);
+    }
+    // remove_callback()/remove_callbacks_by_prefix() each take the GIL
+    // themselves -- no lock-ordering hazard calling them here.
+    for (const auto& k : keys) {
+        remove_callback(k);
+        remove_callbacks_by_prefix(k + "#");
+    }
 }
 
 void stratum_check_java_exc(JNIEnv* env) {

@@ -90,7 +90,14 @@ def map_return_type(jni_class: str) -> dict:
     if jni_class in BOXED_PRIMITIVES:
         jni_t, cpp_t, py_t, _ = BOXED_PRIMITIVES[jni_class]
         return {
-            "jni_type":    jni_t,
+            "jni_type":    "jobject",   # FIX: must stay jobject so the engine
+                                         # calls CallObjectMethodA/GetObjectField,
+                                         # never CallIntMethodA/GetIntField on a
+                                         # method/field whose real JVM signature
+                                         # returns an Object (Ljava/lang/Integer;).
+                                         # Calling a primitive Call<Type>Method on
+                                         # an Object-returning method is a fatal
+                                         # ART abort under CheckJNI.
             "cpp_type":    cpp_t,
             "python_type": py_t,
             "conversion":  "unbox_out",

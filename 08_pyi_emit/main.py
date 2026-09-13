@@ -162,13 +162,16 @@ def fqn_to_module_parts(fqn: str) -> tuple:
 # fall through to the "True" default and always match the first
 # overload tried, regardless of what was actually passed.
 _OVERLOAD_TYPE_CHECK = {
-    "I": "isinstance(args[0], int)",
-    "J": "isinstance(args[0], int)",
-    "S": "isinstance(args[0], int)",
-    "B": "isinstance(args[0], int)",
+    # v10 FIX: Python bool is a subclass of int (isinstance(True, int) is
+    # True). Without excluding bool here, obj.setVisible(True) would match
+    # the int-typed overload before ever reaching the boolean-typed one.
+    "I": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "J": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "S": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "B": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
     "s": "isinstance(args[0], str)",
-    "F": "isinstance(args[0], (float, int))",
-    "D": "isinstance(args[0], (float, int))",
+    "F": "(isinstance(args[0], (float, int)) and not isinstance(args[0], bool))",
+    "D": "(isinstance(args[0], (float, int)) and not isinstance(args[0], bool))",
     "Z": "isinstance(args[0], bool)",
     "[": "isinstance(args[0], (bytes, bytearray))",
     "]": "isinstance(args[0], list)",
@@ -804,14 +807,15 @@ _LIST_TAGS = frozenset("]qfdbchTA")
 
 
 def _matches(tag, target_cid, arg):
-    if tag in ("I", "J", "S", "B"):
-        return isinstance(arg, int)
-    if tag == "s":
-        return isinstance(arg, str)
+    # v10 FIX: check bool BEFORE int (bool subclasses int in Python).
     if tag == "Z":
         return isinstance(arg, bool)
+    if tag in ("I", "J", "S", "B"):
+        return isinstance(arg, int) and not isinstance(arg, bool)
+    if tag == "s":
+        return isinstance(arg, str)
     if tag in ("F", "D"):
-        return isinstance(arg, (float, int))
+        return isinstance(arg, (float, int)) and not isinstance(arg, bool)
     if tag == "[":
         return isinstance(arg, (bytes, bytearray))
     if tag in _LIST_TAGS:
