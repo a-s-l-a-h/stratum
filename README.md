@@ -150,7 +150,7 @@ python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emi
 ───────────────────────────────────────────
 ───────────────────────────────────────────
 ```
-python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --chaquopy 3.10.13-0 --include-pyi no
+python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --chaquopy 3.10.13-0 --include-pyi no --include-reflect yes
 ```
 ───────────────────────────────────────────
 

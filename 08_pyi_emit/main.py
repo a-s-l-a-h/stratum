@@ -188,13 +188,44 @@ _OVERLOAD_TYPE_CHECK = {
 }
 
 
+# v10.2 FIX: boxed wrapper types (java.lang.Boolean/Integer/Long/Short/
+# Byte/Float/Double/Character) as a PARAMETER get tag 'L' since Patch 1
+# (05_resolve's compute_param_tags) — required so pack_arguments() routes
+# them through stratum_py_to_java()'s auto-boxing instead of writing into
+# the wrong jvalue union slot. But that means the OLD overload-check table
+# (which used to catch these via 'Z'/'I'/'F' tags) no longer sees them,
+# and _target_class_id is never set for them either, because
+# java.lang.Boolean/Integer/etc. are core JDK classes that are NEVER
+# extracted into this build (Stage 01 only pulls android.jar, which has
+# no java.lang.* members) — so target_cid is always None and the overload
+# fell through to "always matches". Concretely: ContentValues.put(String,
+# String) vs put(String,Boolean) both got tag 'L' at the differing param,
+# Boolean sorted first alphabetically by JNI signature, and EVERY
+# put(str, str) call silently resolved to the Boolean overload and then
+# crashed JNI's CheckJNI with "attempt to pass String as argument ...
+# Boolean" the instant it actually ran. This table restores a real
+# Python-side type check for each boxed wrapper class by name.
+_BOXED_OVERLOAD_CHECK = {
+    "java/lang/Boolean":   "isinstance(args[0], bool)",
+    "java/lang/Byte":      "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "java/lang/Short":     "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "java/lang/Integer":   "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "java/lang/Long":      "(isinstance(args[0], int) and not isinstance(args[0], bool))",
+    "java/lang/Float":     "(isinstance(args[0], float) and not isinstance(args[0], bool))",
+    "java/lang/Double":    "(isinstance(args[0], float) and not isinstance(args[0], bool))",
+    "java/lang/Character": "isinstance(args[0], str)",
+}
+
+
 def _overload_condition(tag0: str, param0: dict) -> str:
     """Build the runtime disambiguation check for the FIRST differing
     parameter between two overloads sharing the same argument count.
-    Primitives/strings/arrays use the static table above. Plain-object
-    params (tag 'L') have no static type info in Python, so instead of
-    always matching (the old bug — this silently picked whichever
-    overload sorted first alphabetically, e.g. Handler(Callback) beating
+    Primitives/strings/arrays use the static table above. Boxed wrapper
+    params (tag 'L' + is_boxed) use _BOXED_OVERLOAD_CHECK by declared
+    wrapper class name (see v10.2 FIX above). Other plain-object params
+    (tag 'L') have no static type info in Python, so instead of always
+    matching (the old bug — this silently picked whichever overload
+    sorted first alphabetically, e.g. Handler(Callback) beating
     Handler(Looper) every time), compare the wrapped object's concrete
     Java FQN against this overload's declared parameter type. Adapter/
     proxy params ('a'/'p') accept a callable or dict with no _FQN, so
@@ -202,6 +233,10 @@ def _overload_condition(tag0: str, param0: dict) -> str:
     checked."""
     if tag0 in _OVERLOAD_TYPE_CHECK:
         return _OVERLOAD_TYPE_CHECK[tag0]
+    if tag0 == "L" and param0.get("is_boxed", False):
+        boxed_check = _BOXED_OVERLOAD_CHECK.get(param0.get("jni_class", ""))
+        if boxed_check:
+            return boxed_check
     if tag0 in ("L", "a", "p"):
         target_cid = param0.get("_target_class_id")
         if target_cid is not None:
@@ -723,13 +758,23 @@ def build_dynamic_record(data: dict) -> dict:
 
     def param_info(m):
         params = m.get("params", [])
-        return ([p.get("java_type", "") for p in params],
-                [p.get("_target_class_id") for p in params])
+        # v10.3 FIX: dynamic mode's _matches() needs is_boxed/jni_class to
+        # tell boxed wrapper params (java.lang.Boolean/Integer/...) apart
+        # at tag 'L' -- see _BOXED_MATCHERS in STRATUM_DYNAMIC_PY below.
+        # Static mode already carries this via param0.get('is_boxed')/
+        # ('jni_class') straight from the JSON; dynamic mode packs its
+        # own compact record and was missing these two fields.
+        return (
+            [p.get("java_type", "") for p in params],
+            [p.get("_target_class_id") for p in params],
+            [bool(p.get("is_boxed", False)) for p in params],
+            [p.get("jni_class", "") for p in params],
+        )
 
     ctors = []
     for c in data.get("constructors", []):
-        java_types, target_cids = param_info(c)
-        ctors.append([c["slot"], c.get("param_tags", ""), java_types, target_cids, 0, ""])
+        java_types, target_cids, is_boxed, jni_classes = param_info(c)
+        ctors.append([c["slot"], c.get("param_tags", ""), java_types, target_cids, 0, "", is_boxed, jni_classes])
 
     grouped = defaultdict(list)
     for m in data.get("methods", []):
@@ -743,10 +788,10 @@ def build_dynamic_record(data: dict) -> dict:
         is_static = group[0].get("is_static", False)
         overloads = []
         for m in group:
-            java_types, target_cids = param_info(m)
+            java_types, target_cids, is_boxed, jni_classes = param_info(m)
             overloads.append([
                 m["slot"], m.get("param_tags", ""), java_types, target_cids,
-                m.get("ret_type_id", 10), m.get("return_fqn", ""),
+                m.get("ret_type_id", 10), m.get("return_fqn", ""), is_boxed, jni_classes,
             ])
         methods[py_name] = [snake_name, is_static, overloads]
 
@@ -805,8 +850,29 @@ _FIELD_SET_DISPATCH = {
 # 08_pyi_emit/main.py EXACTLY -- same tag, same verdict, in both modes.
 _LIST_TAGS = frozenset("]qfdbchTA")
 
+# v10.3 FIX: mirrors _BOXED_OVERLOAD_CHECK in 08_pyi_emit/main.py (static
+# mode). Boxed wrapper params (java.lang.Boolean/Integer/Long/Short/Byte/
+# Float/Double/Character) get tag 'L' from compute_param_tags(), same as
+# any other object param -- so without checking is_boxed/jni_class here,
+# every overload whose differing param is a boxed wrapper type (e.g.
+# ContentValues.put(String,String) vs put(String,Boolean)) fell through
+# to the generic target_cid fallback below, which is always None for
+# these (java.lang.* is never extracted -- Stage 01 only pulls
+# android.jar), so _matches() always returned True and silently picked
+# whichever overload's JNI signature sorted first.
+_BOXED_MATCHERS = {
+    "java/lang/Boolean":   lambda a: isinstance(a, bool),
+    "java/lang/Byte":      lambda a: isinstance(a, int) and not isinstance(a, bool),
+    "java/lang/Short":     lambda a: isinstance(a, int) and not isinstance(a, bool),
+    "java/lang/Integer":   lambda a: isinstance(a, int) and not isinstance(a, bool),
+    "java/lang/Long":      lambda a: isinstance(a, int) and not isinstance(a, bool),
+    "java/lang/Float":     lambda a: isinstance(a, float) and not isinstance(a, bool),
+    "java/lang/Double":    lambda a: isinstance(a, float) and not isinstance(a, bool),
+    "java/lang/Character": lambda a: isinstance(a, str),
+}
 
-def _matches(tag, target_cid, arg):
+
+def _matches(tag, target_cid, is_boxed, jni_class, arg):
     # v10 FIX: check bool BEFORE int (bool subclasses int in Python).
     if tag == "Z":
         return isinstance(arg, bool)
@@ -824,6 +890,12 @@ def _matches(tag, target_cid, arg):
         return isinstance(arg, (list, tuple, set)) or hasattr(arg, "_ptr")
     if tag == "N":
         return isinstance(arg, dict) or hasattr(arg, "_ptr")
+    # v10.3 FIX: boxed wrapper param at tag 'L' -- check by jni_class name
+    # BEFORE the generic target_cid fallback.
+    if tag == "L" and is_boxed:
+        checker = _BOXED_MATCHERS.get(jni_class)
+        if checker:
+            return checker(arg)
     # tags 'L' / 'a' / 'p': same rule as _overload_condition()'s fallback
     if target_cid is not None:
         return (not hasattr(arg, "_ptr") or not arg._ptr
@@ -854,7 +926,16 @@ def _pick_overload(overloads, args, name="method"):
     for ov in candidates:
         tag = ov[1][diff_idx] if diff_idx < len(ov[1]) else "L"
         cid = ov[3][diff_idx] if diff_idx < len(ov[3]) else None
-        if _matches(tag, cid, args[diff_idx]):
+        # v10.3 FIX: ov[6]/ov[7] are the new is_boxed/jni_class lists.
+        # Guarded with len(ov) > 6 so old cached _meta.json.gz blobs
+        # (built before this fix, still holding 6-element tuples) don't
+        # IndexError -- they just get is_boxed=False, jni_class="" and
+        # fall through to the pre-fix behavior for that one call, not a
+        # crash. Rerun Stage 08 with --mode dynamic to regenerate the
+        # blob with 8-element tuples everywhere.
+        boxed = ov[6][diff_idx] if len(ov) > 6 and diff_idx < len(ov[6]) else False
+        jcls = ov[7][diff_idx] if len(ov) > 7 and diff_idx < len(ov[7]) else ""
+        if _matches(tag, cid, boxed, jcls, args[diff_idx]):
             return ov
     return candidates[0]
 
@@ -873,22 +954,22 @@ def _make_method(class_id, is_static, overloads, name):
     single = len(overloads) == 1
     if is_static:
         if single:
-            slot, _t, _jt, _cids, rt, rfqn = overloads[0]
+            slot, _t, _jt, _cids, rt, rfqn = overloads[0][:6]
             def fn(*args):
                 return _dispatch_call(0, class_id, slot, rt, rfqn, args)
         else:
             def fn(*args):
-                slot, _t, _jt, _cids, rt, rfqn = _pick_overload(overloads, args, name)
+                slot, _t, _jt, _cids, rt, rfqn = _pick_overload(overloads, args, name)[:6]
                 return _dispatch_call(0, class_id, slot, rt, rfqn, args)
         return staticmethod(fn)
 
     if single:
-        slot, _t, _jt, _cids, rt, rfqn = overloads[0]
+        slot, _t, _jt, _cids, rt, rfqn = overloads[0][:6]
         def fn(self, *args):
             return _dispatch_call(self._ptr, class_id, slot, rt, rfqn, args)
     else:
         def fn(self, *args):
-            slot, _t, _jt, _cids, rt, rfqn = _pick_overload(overloads, args, name)
+            slot, _t, _jt, _cids, rt, rfqn = _pick_overload(overloads, args, name)[:6]
             return _dispatch_call(self._ptr, class_id, slot, rt, rfqn, args)
     return fn
 
@@ -903,7 +984,7 @@ def _make_init(class_id, ctors, simple_name):
                 f"{simple_name} has no accessible constructor. "
                 f"Obtain instances via the relevant Android factory method or system service instead."
             )
-        slot, _t, _jt, _cids, _rt, _rfqn = _pick_overload(ctors, args, simple_name)
+        slot, _t, _jt, _cids, _rt, _rfqn = _pick_overload(ctors, args, simple_name)[:6]
         ptr = _core.new_instance(class_id, slot, *args)
         StratumObject.__init__(self, _ptr=ptr)
     return __init__
