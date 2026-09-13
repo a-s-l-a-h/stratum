@@ -1485,3 +1485,26 @@ int32_t object_hash_code(int64_t ptr) {
     if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
     return (int32_t)h;
 }
+
+
+// Support for stratum.reflect: returns the object's REAL runtime class
+// name (getClass().getName()), so call_java_method() resolves against
+// the actual subclass rather than a static wrapper type. Same shape/
+// safety as object_to_string()/object_hash_code() above: one bounded
+// local frame, no loop, zero cost when unused.
+std::string get_class_name(int64_t ptr) {
+    if (!ptr) return "";
+    JNIEnv* env = get_env();
+    if (!env) return "";
+    JniLocalFrame frame(env, 8);
+    jobject obj = (jobject)(uintptr_t)ptr;
+    jclass cls = env->GetObjectClass(obj);
+    if (!cls) { env->ExceptionClear(); return ""; }
+    jclass ccls = g_class_class ? g_class_class : env->FindClass("java/lang/Class");
+    jmethodID mid = ccls ? env->GetMethodID(ccls, "getName", "()Ljava/lang/String;") : nullptr;
+    if (!mid) { env->ExceptionClear(); env->DeleteLocalRef(cls); return ""; }
+    jstring jn = (jstring)env->CallObjectMethod(cls, mid);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    return stratum_jstring_to_str(env, jn);
+}

@@ -144,6 +144,42 @@ void stratum_check_java_exc(JNIEnv* env) {
     env->ExceptionClear();
     std::string msg = "Java exception";
     if (ex) {
+        // stratum.reflect's Method.invoke() wraps the real failure in
+        // InvocationTargetException, whose own getMessage() is null.
+        // Unwrap so the caller sees the actual cause. Every JNI call
+        // below is individually guarded with ExceptionCheck()+Clear():
+        // per the JNI spec, calling GetObjectClass/CallObjectMethod/
+        // GetMethodID while ANY exception is pending is undefined
+        // behavior and aborts under CheckJNI (the default on
+        // debuggable/userdebug builds). This unwrap path only runs on
+        // the already-rare exception path -- zero cost otherwise, and
+        // a no-op for every existing call path (call_v/z/i/j/d/str/o,
+        // field access, new_instance never throw InvocationTargetException).
+        jclass ite_cls = env->FindClass("java/lang/reflect/InvocationTargetException");
+        if (env->ExceptionCheck()) {
+            // FindClass itself faulted (essentially impossible for a
+            // core JDK class, but must be handled) -- clear before
+            // touching `ex` with anything else.
+            env->ExceptionClear();
+            ite_cls = nullptr;
+        }
+        if (ite_cls && env->IsInstanceOf(ex, ite_cls)) {
+            jmethodID mid_cause = env->GetMethodID(ite_cls, "getTargetException", "()Ljava/lang/Throwable;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mid_cause = nullptr; }
+            if (mid_cause) {
+                jthrowable cause = (jthrowable)env->CallObjectMethod(ex, mid_cause);
+                if (env->ExceptionCheck()) {
+                    // getTargetException() itself faulted (e.g. OOM) --
+                    // clear it and keep using the original `ex` rather
+                    // than touching a possibly-invalid `cause`.
+                    env->ExceptionClear();
+                } else if (cause) {
+                    env->DeleteLocalRef(ex);
+                    ex = cause;
+                }
+            }
+        }
+        if (ite_cls) env->DeleteLocalRef(ite_cls);
         jclass ecls = env->GetObjectClass(ex);
         jmethodID emid = env->GetMethodID(ecls, "getMessage", "()Ljava/lang/String;");
         if (emid) {

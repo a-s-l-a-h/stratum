@@ -89,6 +89,7 @@ void rekey_callback(const std::string& old_key, const std::string& new_key);
 bool         is_instance_of(int64_t ptr, uint32_t class_id);
 std::string  object_to_string(int64_t ptr);
 int32_t      object_hash_code(int64_t ptr);
+std::string  get_class_name(int64_t ptr);
 
 // Checks for a pending Java exception. If present: clears it, extracts the
 // message, and throws std::runtime_error (which nanobind turns into a

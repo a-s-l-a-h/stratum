@@ -40,6 +40,7 @@ void release_native_window(int64_t);
 bool is_instance_of(int64_t, uint32_t);
 std::string object_to_string(int64_t);
 int32_t object_hash_code(int64_t);
+std::string get_class_name(int64_t);
 
 static std::unordered_map<std::string, nb::callable> g_lifecycle_cbs;
 static std::mutex g_lifecycle_mutex;
@@ -168,6 +169,22 @@ NB_MODULE(_stratum, m) {
     m.def("is_instance_of", &is_instance_of);
     m.def("to_string", &object_to_string);
     m.def("hash_code", &object_hash_code);
+    m.def("get_class_name", &get_class_name);
+
+    // Exposes the SAME cached app ClassLoader that find_class() already
+    // uses internally for adapters/proxies -- so stratum.reflect can
+    // resolve custom app classes correctly WITHOUT needing a live
+    // Activity (works from a Service/Receiver at boot). Read-only:
+    // g_app_class_loader is set once in JNI_OnLoad and never mutated
+    // afterward, so no lock is needed. Follows the exact same
+    // per-caller NewGlobalRef pattern as get_activity_ptr() below.
+    m.def("get_app_classloader_ptr", []() -> int64_t {
+        if (!g_app_class_loader) return 0;
+        JNIEnv* env = get_env();
+        if (!env) return (int64_t)(uintptr_t)g_app_class_loader;
+        return (int64_t)(uintptr_t)env->NewGlobalRef(g_app_class_loader);
+    });
+
     m.def("remove_callback", [](const std::string& key) { remove_callback(key); });
     m.def("remove_callbacks_by_prefix", [](const std::string& prefix) { return remove_callbacks_by_prefix(prefix); });
     m.def("stratum_callback_count", []() -> size_t { return stratum_callback_count(); });
