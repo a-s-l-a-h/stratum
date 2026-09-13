@@ -1019,6 +1019,30 @@ Java_com_stratum_runtime_StratumInvocationHandler_nativeDispatch(
         jobject o = (jobject)stratum_str_to_jstring(env, nb::cast<std::string>(py_result));
         return frame.pop(o);
     }
+    // list/tuple of ints -> Java int[]. Used by StratumView.onMeasure()
+    // to report a custom measured [width, height] back to Android's
+    // layout pass. Previously any list/tuple return fell straight
+    // through to the "return null" path at the bottom of this function.
+    if (nb::isinstance<nb::list>(py_result) || nb::isinstance<nb::tuple>(py_result)) {
+        std::vector<jint> buf;
+        bool all_ints = true;
+        for (auto item : py_result) {
+            // bool is a subclass of int in Python (isinstance(True, int)
+            // == True), so this MUST be checked before int_, or a list
+            // containing True/False silently becomes {1, 0} and gets
+            // accepted as valid measured dimensions.
+            if (nb::isinstance<nb::bool_>(item) || !nb::isinstance<nb::int_>(item)) {
+                all_ints = false;
+                break;
+            }
+            buf.push_back((jint)nb::cast<int64_t>(item));
+        }
+        if (all_ints && !buf.empty()) {
+            jintArray arr = env->NewIntArray((jsize)buf.size());
+            if (arr) env->SetIntArrayRegion(arr, 0, (jsize)buf.size(), buf.data());
+            return frame.pop((jobject)arr);
+        }
+    }
     if (nb::hasattr(py_result, "_ptr")) {
         jobject rv = (jobject)(uintptr_t)nb::cast<int64_t>(py_result.attr("_ptr"));
         LOGT("<< PY->JAVA DISPATCH key='%s' returned object ptr=%p", routed_key.c_str(), (void*)rv);

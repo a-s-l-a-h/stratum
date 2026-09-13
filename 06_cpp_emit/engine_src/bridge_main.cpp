@@ -75,6 +75,12 @@ static void dispatch_lifecycle(const char* name) {
     }
 }
 
+// ── Runtime bridge helper (StratumView) ─────────────────────────────────
+// Bypasses the class_id/slot metadata table entirely: View/ViewGroup are
+// structurally reserved and never auto-generated, so there is no JSON
+// entry and no generated Python wrapper path to reach StratumView
+// through. Direct JNI construction instead — same pattern already used
+// by set_content_view()/get_activity_ptr() below.
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_jvm = vm;
     JNIEnv* env = nullptr;
@@ -165,6 +171,31 @@ NB_MODULE(_stratum, m) {
     m.def("remove_callback", [](const std::string& key) { remove_callback(key); });
     m.def("remove_callbacks_by_prefix", [](const std::string& prefix) { return remove_callbacks_by_prefix(prefix); });
     m.def("stratum_callback_count", []() -> size_t { return stratum_callback_count(); });
+
+    // store_callback() has existed in bridge_core.cpp since v9 but was
+    // never bound here — without this line, there is no way for Python
+    // to bind a callable to a routed_key that nativeDispatch() looks up.
+    m.def("register_callback", [](const std::string& key, nb::callable fn) {
+        store_callback(key, std::move(fn));
+    });
+
+    m.def("create_stratum_view", [](const std::string& key) -> int64_t {
+        JNIEnv* env = get_env();
+        if (!env) throw std::runtime_error("Stratum: No JNIEnv on this thread");
+        jobject act;
+        { std::lock_guard<std::mutex> lk(g_activity_mutex); act = g_activity; }
+        if (!act) throw std::runtime_error("Stratum: Activity not ready yet");
+        JniLocalFrame frame(env, 8);
+        jclass cls = find_class(env, "com/stratum/runtime/StratumView");
+        if (!cls) throw std::runtime_error("Stratum: StratumView.java not compiled into APK");
+        jmethodID ctor = env->GetMethodID(cls, "<init>", "(Landroid/content/Context;Ljava/lang/String;)V");
+        if (!ctor) throw std::runtime_error("Stratum: StratumView constructor not found");
+        jstring jkey = stratum_str_to_jstring(env, key);
+        jobject obj = env->NewObject(cls, ctor, act, jkey);
+        stratum_check_java_exc(env);
+        if (!obj) return 0;
+        return (int64_t)(uintptr_t)env->NewGlobalRef(obj);
+    });
 
     m.def("bytebuffer_to_memoryview", &bytebuffer_to_memoryview);
     m.def("allocate_direct_buffer", &allocate_direct_buffer);
