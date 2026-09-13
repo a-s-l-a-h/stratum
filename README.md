@@ -1,7 +1,11 @@
-## happening a bigger architecture change ( above v0.3_1 ( not in v0.3_1))
-## 🚀 Architecture Evolution: The Universal Data-Driven Engine 
+## 🚀 Architecture Evolution: The Universal Data-Driven Engine
 
-Stratum has transitioned from a brute-force static C++ code-generator (v0.3_1 and old ) to a **high-performance, data-driven JNI virtual engine (after v0.3_1 )**. 
+Stratum has undergone a major architectural transformation after v0.3_1, evolving from a brute-force, static C++ code generator into a **high-performance, data-driven JNI virtual engine**.
+
+> **Note:** This new architecture was introduced **after v0.3_1** and is **not part of the v0.3_1 release**.
+
+For a demonstration of the new architecture, visit the [Stratum OpenCV Demo](https://github.com/a-s-l-a-h/Stratum-OpenCV-Demo).
+
 
 Instead of generating thousands of bloated, redundant C++ wrapper classes and Nanobind headers that cause compiler out-of-memory errors, Stratum compiles the entire Android SDK surface into an ahead-of-time (AOT) **Deduplicated String Pool** and flat **Class/Method Metadata Table**. All runtime calls funnel through an ultra-compact, 6-file C++ execution core executing in $O(1)$ constant time via direct table slots.
 
