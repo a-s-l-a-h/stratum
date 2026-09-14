@@ -51,19 +51,16 @@ That's it — no Java file, no AIDL, no manually-written JNI. This snippet works
 
 ## 🚀 Why Stratum?
 
-Most Python-on-Android bridges either:
-- hand-write a small, curated wrapper around a handful of Android classes, or
-- generate one C++ file *per Java class*, which explodes compile time and RAM usage once you try to cover the full SDK.
+
 
 Stratum takes a different approach: the whole SDK surface (classes, methods, fields, signatures) is compiled once into a **deduplicated string pool + flat metadata table**, and a single **6-file C++ dispatch engine** looks up `(class_id, slot)` pairs at call time — no reflection, no per-class glue code.
 
-| | Legacy per-class codegen | Stratum's Universal Engine |
+| | Stratum's Universal Engine |
 |---|---|---|
-| Generated C++ files | Thousands | **6, fixed** |
-| C++ build time | 20–60+ min (OOM risk) | **Seconds** |
-| Method resolution | Static link-time | **Lazy, cached, O(1)** |
-| Binary metadata | Tens of MB | **~2 MB pool** |
-| Adding SDK coverage | Regenerate everything | Just re-run the pipeline |
+| Generated C++ files | **6, fixed** |
+| C++ build time  | **Seconds** |
+| Method resolution | **Lazy, cached, O(1)** |
+| Binary metadata  | **~2 MB pool** |
 
 ---
 
