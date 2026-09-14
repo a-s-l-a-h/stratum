@@ -56,7 +56,7 @@ That's it — no Java file, no AIDL, no manually-written JNI. This snippet works
 Stratum takes a different approach: the whole SDK surface (classes, methods, fields, signatures) is compiled once into a **deduplicated string pool + flat metadata table**, and a single **6-file C++ dispatch engine** looks up `(class_id, slot)` pairs at call time — no reflection, no per-class glue code.
 
 | | Stratum's Universal Engine |
-|---|---|---|
+|---|---|
 | Generated C++ files | **6, fixed** |
 | C++ build time  | **Seconds** |
 | Method resolution | **Lazy, cached, O(1)** |
