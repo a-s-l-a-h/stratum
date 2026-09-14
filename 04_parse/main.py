@@ -598,40 +598,53 @@ def parse_javap(text: str) -> dict:
 
             # ── Field: no parentheses ──────────────────────────────────────────
             if "(" not in stripped:
-                # Only track static final constants (useful for JNI field IDs)
-                if "static" in stripped and "final" in stripped:
-                    # Parse: public static final int FLAG_SOMETHING = 1;
-                    #        public static final java.lang.String SOME_KEY;
+                is_public = bool(re.search(r"\bpublic\b", stripped))
+                is_protected = bool(re.search(r"\bprotected\b", stripped))
+                is_private = bool(re.search(r"\bprivate\b", stripped))
+                is_static = bool(re.search(r"\bstatic\b", stripped))
+                is_final = bool(re.search(r"\bfinal\b", stripped))
+
+                # Allow all accessible public and protected fields (static AND instance)
+                if (is_public or is_protected) and not is_private:
                     core = stripped
-                    for mod in ("public", "protected", "private", "static", "final"):
+                    for mod in ("public", "protected", "private", "static", "final", "volatile", "transient"):
                         core = re.sub(rf"\b{mod}\s+", "", core)
                     core = core.strip().rstrip(";")
-                    # Extract inline value
+
                     const_val = None
                     if "=" in core:
                         parts = core.split("=", 1)
                         core = parts[0].strip()
                         const_val = parts[1].strip().rstrip(";").strip()
 
+                    # CRUCIAL: Strip generics so types like List<String> or
+                    # Map<K, V> don't get split on the internal whitespace
+                    # and mangle field_name. Mirrors the identical patch
+                    # already applied to method parsing below.
+                    core = strip_generics(core).strip()
+
                     parts = core.split()
                     if len(parts) >= 2:
                         field_type = parts[0]
                         field_name = parts[1]
-                        current_field = {
-                            "name":           field_name,
-                            "java_type":      field_type,
-                            "is_static":      True,
-                            "is_final":       True,
-                            "is_private":     bool(re.search(r"\bprivate\b", stripped)),
-                            "is_protected":   bool(re.search(r"\bprotected\b", stripped)),
-                            "is_public":      bool(re.search(r"\bpublic\b", stripped)),
-                            "constant_value": const_val,
-                            "descriptor":     "",
-                            "jni_type":       "jobject",
-                            "cpp_type":       "jobject",
-                            "python_type":    "object",
-                        }
-                        # Descriptor comes on next line
+
+                        # Skip synthetic/compiler-generated fields
+                        if not field_name.startswith("$"):
+                            current_field = {
+                                "name":           field_name,
+                                "java_type":      field_type,
+                                "is_static":      is_static,
+                                "is_final":       is_final,
+                                "is_private":     is_private,
+                                "is_protected":   is_protected,
+                                "is_public":      is_public,
+                                "constant_value": const_val,
+                                "descriptor":     "",
+                                "jni_type":       "jobject",
+                                "cpp_type":       "jobject",
+                                "python_type":    "object",
+                            }
+                            # Descriptor comes on next line
                 continue
 
             # ── Method / Constructor ───────────────────────────────────────────
@@ -642,6 +655,7 @@ def parse_javap(text: str) -> dict:
             is_protected = bool(re.search(r"\bprotected\b", stripped))
             is_public = bool(re.search(r"\bpublic\b", stripped))
             is_final_method = bool(re.search(r"\bfinal\b", stripped))
+            is_default_method = bool(re.search(r"\bdefault\b", stripped))
 
             # Throws on this line
             pending_throws = parse_throws(stripped)
@@ -696,6 +710,7 @@ def parse_javap(text: str) -> dict:
                 "is_protected":    is_protected,
                 "is_public":       is_public,
                 "is_final":        is_final_method,
+                "is_default":      is_default_method,
                 "return_hint":     return_type_hint,  # raw Java return type string
                 "jni_signature":   "",
                 "params":          [],
