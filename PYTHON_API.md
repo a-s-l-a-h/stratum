@@ -1,124 +1,101 @@
-# Stratum Python API Reference & Developer Guide
 
-> **Official Developer Guide for Stratum**  
-> High-performance, zero-overhead Python-to-Android native bridge.
 
----
+# Stratum Python API Guide
 
-## ⚡ Quick Cheat Sheet: The 5 Golden Rules
+> **This is a usage guide, not a build guide.** It assumes you already have a Stratum wheel installed in a Chaquopy Android project (see the main [`README.md`](README.md) for that). Everything below is about **how to write Python code against the Stratum API**, verified against the actual generated code.
 
-Before writing code, keep these fundamental architectural rules in mind:
-
-1. **Imports Mirror Android Packages:** Classes are imported directly from their corresponding Android package structure under `stratum.`:  
-   ```python
-   from stratum.android.widget.TextView import TextView
-   from stratum.android.view.View import View
-   ```
-2. **Inner Classes Use Underscores (`_` instead of `$`):** Java nested classes and interfaces (e.g., `Paint$Style` or `View$OnClickListener`) are mapped using an underscore:  
-   ```python
-   from stratum.android.graphics.Paint_Style import Paint_Style
-   from stratum.android.view.View_OnClickListener import View_OnClickListener
-   ```
-   *(Never use dot notation like `Paint.Style`—it will raise an `AttributeError` at runtime).*
-3. **Static vs. Instance Field Access:** Static constants use `sf_get_*()` and `sf_set_*()`. Instance fields on an object use `f_get_*()` and `f_set_*()`:  
-   ```python
-   visible_state = View.sf_get_VISIBLE()
-   sensor_values = sensor_event.f_get_values()
-   ```
-4. **Both `camelCase` and `snake_case` are Supported:** Every Java method is exposed with both its original Java name and an idiomatic Python alias:  
-   ```python
-   tv.setText("Hello")
-   tv.set_text("Hello")  # Identical native call
-   ```
-5. **Retain Root Views in Global Scope:** Python's garbage collector will destroy your view hierarchy when `onCreate()` returns unless assigned to a module-level variable:  
-   ```python
-   app_layout = None  # Global module reference
-
-   def onCreate():
-       global app_layout
-       app_layout = LinearLayout(stratum.getActivity())
-       stratum.setContentView(stratum.getActivity(), app_layout)
-   ```
+If something behaves unexpectedly, check [Troubleshooting](#16-troubleshooting--common-pitfalls) before assuming it's a bug — the failure modes below cover the overwhelming majority of real issues people hit.
 
 ---
 
 ## Table of Contents
 
-1. [Application Lifecycle & Entry Point (`main.py`)](#1-application-lifecycle--entry-point-mainpy)
-2. [Importing Classes & Naming Conventions](#2-importing-classes--naming-conventions)
-3. [Method Invocations, Overloads & Varargs](#3-method-invocations-overloads--varargs)
-4. [Fields, Constants & Enums (`sf_get_*` / `f_get_*`)](#4-fields-constants--enums-sf_get_--f_get_)
-5. [Type Marshaling & Data Conversion](#5-type-marshaling--data-conversion)
-6. [Event Listeners & Callback Dispatch](#6-event-listeners--callback-dispatch)
-7. [Thread Safety & UI Thread Dispatch](#7-thread-safety--ui-thread-dispatch)
-8. [Custom 2D Graphics & Views (`CustomCanvasView`)](#8-custom-2d-graphics--views-customcanvasview)
-9. [Direct ByteBuffers & Zero-Copy Native Memory](#9-direct-bytebuffers--zero-copy-native-memory)
-10. [Type Casting & Object Identity](#10-type-casting--object-identity)
-11. [Calling Python from Java (`@stratum.export`)](#11-calling-python-from-java-stratumexport)
-12. [Dynamic Reflection Escape Hatch (`stratum.reflect`)](#12-dynamic-reflection-escape-hatch-stratumreflect)
-13. [Working with XML Layouts & Android Resources](#13-working-with-xml-layouts--android-resources)
-14. [Complete Production-Grade Examples](#14-complete-production-grade-examples)
+1. [Getting Started](#1-getting-started)
+2. [Core Concept: StratumObject](#2-core-concept-stratumobject)
+3. [Importing Classes & Naming Conventions](#3-importing-classes--naming-conventions)
+4. [Method Calls, Overloads & Varargs](#4-method-calls-overloads--varargs)
+5. [Fields & Constants](#5-fields--constants)
+6. [Type Marshaling](#6-type-marshaling)
+7. [Event Listeners & Callbacks](#7-event-listeners--callbacks)
+8. [Threading & the UI Thread](#8-threading--the-ui-thread)
+9. [Custom 2D Views (`CustomCanvasView`)](#9-custom-2d-views-customcanvasview)
+10. [Direct ByteBuffers & Zero-Copy Memory](#10-direct-bytebuffers--zero-copy-memory)
+11. [Casting & Object Identity](#11-casting--object-identity)
+12. [Calling Python from Java](#12-calling-python-from-java)
+13. [The Reflection Escape Hatch](#13-the-reflection-escape-hatch)
+14. [XML Layouts](#14-xml-layouts-read-this-before-using)
+15. [Worked Examples (Known-Good)](#15-worked-examples-known-good)
+16. [Troubleshooting & Common Pitfalls](#16-troubleshooting--common-pitfalls)
+17. [Quick Reference Cheat Sheet](#17-quick-reference-cheat-sheet)
 
 ---
 
-## 1. Application Lifecycle & Entry Point (`main.py`)
+## 1. Getting Started
 
-Every Stratum application begins in `main.py`. The native runtime automatically discovers and binds top-level lifecycle functions on launch.
+Every Stratum app has a `main.py` with recognized top-level lifecycle functions. Stratum discovers and wires these automatically on launch — you don't call them yourself.
 
 ```python
 import stratum
 
 def onCreate():
-    """
-    Called when the Activity is first created.
-    Initialize components, instantiate views, and mount your layout here.
-    """
-    activity = stratum.getActivity()
-    # Build your layout...
+    """Called once, when the Activity is first created. Build your UI here."""
+    activity = stratum.get_activity()
+    # ...
 
-def onResume():
-    """Called when the application begins interacting with the user."""
-    pass
-
-def onPause():
-    """Called when the application is partially obscured or losing focus."""
-    pass
-
-def onStop():
-    """Called when the application is no longer visible to the user."""
-    pass
-
-def onDestroy():
-    """Called before the Activity is destroyed by the system."""
-    pass
+def onResume():   pass   # App is interactive
+def onPause():    pass   # App losing focus
+def onStop():     pass   # App no longer visible
+def onDestroy():  pass   # Activity is being torn down
 
 def onBackPressed() -> bool:
-    """
-    Intercepts the hardware or gesture back button.
-    Return True  -> Consumes the event (e.g., handles in-app navigation).
-    Return False -> Allows Android to perform default back action (exits app).
-    """
-    if can_navigate_back():
-        pop_navigation_stack()
-        return True
+    """Return True to consume the back button yourself; False for default behavior."""
     return False
 ```
 
-### Core Top-Level Module APIs
+### Top-level module functions
 
 | Function | Description |
-| :--- | :--- |
-| `stratum.getActivity()` / `get_activity()` | Returns the current Android `Activity` wrapped as `stratum.android.app.Activity`. Returns `None` if called prior to initialization. |
-| `stratum.setContentView(activity, view)` | Attaches the given `View` instance as the root content view of the specified `Activity`. |
-| `stratum.set_log_enabled(enabled: bool)` | Toggles deep C++ bridge logging in logcat at runtime (if enabled at build time). |
+|---|---|
+| `stratum.get_activity()` / `getActivity()` | Current `Activity`, wrapped as `stratum.android.app.Activity`. `None` before `onCreate`. |
+| `stratum.setContentView(activity, view)` / `set_content_view(...)` | Mounts a `View` as the Activity's root content view. |
+| `stratum.set_log_enabled(bool)` | Toggles deep native/JNI logcat tracing at runtime (only meaningful if the engine was compiled with logging support — see Troubleshooting). |
+| `stratum.run_on_ui_thread(fn, *args, **kwargs)` | Posts a call to the main looper. Fire-and-forget — see [§8](#8-threading--the-ui-thread). |
+| `@stratum.ui_thread` | Decorator version of the above. Also fire-and-forget. |
+| `stratum.to_java(obj)` / `stratum.to_py(obj)` | Deep-convert Python ⇄ Java data structures. |
+| `stratum.to_java_array(items, "fully.qualified.Type")` | Build a strongly-typed Java array. |
+| `@stratum.export` | Expose a Python function to Java. |
+| `stratum.register_callback(key, fn)` | Low-level callback registration (used internally by `stratum.ui`). Not normally needed directly. |
+| `stratum.remove_callback(key)` / `remove_callbacks_by_prefix(prefix)` / `callback_count()` | Manual callback bookkeeping — see [§7](#managing-callback-memory). |
+| `stratum.stratum_cast(obj, TargetClass)` | Safe downcast with `instanceof` verification. |
+| `stratum.allocate_direct_buffer(capacity)` | Allocate an off-heap `java.nio.ByteBuffer` — see [§10](#10-direct-bytebuffers--zero-copy-memory). |
+| `stratum.surface_to_native_window(surface)` / `release_native_window(win_ptr)` | Native rendering handle — see [§10](#10-direct-bytebuffers--zero-copy-memory). |
 
 ---
 
-## 2. Importing Classes & Naming Conventions
+## 2. Core Concept: StratumObject
 
-### Standard Classes
+Every wrapped Java object is a Python instance of a class deriving from `StratumObject`. It holds exactly one thing: `_ptr`, an integer JNI global-reference handle.
 
-Import paths directly mirror the Android SDK hierarchy under the `stratum.` root package:
+```python
+tv = TextView(activity)
+print(tv._ptr)       # the underlying JNI global ref, as an int
+print(tv)             # calls Java toString()
+tv == other_view       # JNI IsSameObject, not Python identity
+hash(tv)               # Java hashCode()
+```
+
+**Lifetime rule:** when a Python wrapper is garbage-collected, its `__del__` does two things:
+
+1. Releases the JNI global reference it held.
+2. **Unregisters every callback that was attached *through that specific object*.** Stratum tracks callbacks internally with a key tied to the object's pointer, and clears all of them the moment the object is destroyed.
+
+That second point is the important one. It means: if you build a `SensorManager`, `CameraDevice`, `Handler`, or a view you plan to keep updating, and you don't keep a live Python reference to it (a module-level `global`, a list, an attribute on something long-lived), two things go wrong the moment it's collected — you lose the ability to call methods on it from Python, **and any listener you registered through it silently stops firing, with no error raised.** See [Golden Rule](#golden-rule-retain-everything-you-need-later) in Troubleshooting.
+
+---
+
+## 3. Importing Classes & Naming Conventions
+
+Import paths mirror the Android SDK package structure under `stratum.`, one module per class:
 
 ```python
 from stratum.android.widget.TextView import TextView
@@ -129,152 +106,123 @@ from stratum.android.content.Intent import Intent
 from stratum.android.graphics.Bitmap import Bitmap
 ```
 
-### Inner Classes, Static Classes & Enums
+> ⚠️ **Always import the class from its own module like this.** A shortcut like `from stratum.android.widget import Button, TextView` (importing straight from the package) is **not reliable** — depending on import order it can bind the *module* object instead of the *class*, which will fail when you try to call it. Always use the fully-qualified `from stratum.<pkg>.<ClassName> import <ClassName>` form shown above.
 
-In Java bytecode, inner classes are separated by `$`. In Stratum, **all inner classes and nested types use an underscore (`_`)**:
+### Inner classes use `_` instead of `$`
 
-| Java Class / Interface | Stratum Python Import |
-| :--- | :--- |
+Java nested types (`Paint.Style`, `View.OnClickListener`, …) are compiled as `_`-joined classes:
+
+| Java | Stratum import |
+|---|---|
 | `android.graphics.Paint.Style` | `from stratum.android.graphics.Paint_Style import Paint_Style` |
 | `android.view.View.OnClickListener` | `from stratum.android.view.View_OnClickListener import View_OnClickListener` |
 | `android.view.ViewGroup.LayoutParams` | `from stratum.android.view.ViewGroup_LayoutParams import ViewGroup_LayoutParams` |
-| `android.graphics.Bitmap.CompressFormat` | `from stratum.android.graphics.Bitmap_CompressFormat import Bitmap_CompressFormat` |
 | `android.hardware.camera2.CameraDevice.StateCallback` | `from stratum.android.hardware.camera2.CameraDevice_StateCallback import CameraDevice_StateCallback` |
 
-> ⚠️ **Common Mistake:** Attempting `Paint.Style` will fail with an `AttributeError`. You must import `Paint_Style` directly.
+> ⚠️ `Paint.Style` (dot notation) **will not work** — it raises `AttributeError`. Always import the underscore form directly.
 
 ---
 
-## 3. Method Invocations, Overloads & Varargs
+## 4. Method Calls, Overloads & Varargs
 
-### Dual Naming: camelCase & snake_case
-
-Stratum generates both the original Java method name and an idiomatic Python alias for every method:
+### camelCase *and* snake_case both work
 
 ```python
-tv = TextView(activity)
-
-# Both call the exact same underlying JNI method ID:
 tv.setText("Status: Active")
-tv.set_text("Status: Active")
+tv.set_text("Status: Active")     # identical call, PEP 8 alias
 
 tv.setVisibility(View.sf_get_VISIBLE())
 tv.set_visibility(View.sf_get_VISIBLE())
 ```
 
-### Dynamic Overload Resolution
-
-Java allows multiple methods with the same name and differing parameter types. Stratum inspects incoming argument counts, types, and inheritance hierarchies dynamically:
+### Overloads resolve automatically by argument shape
 
 ```python
-from stratum.android.widget.LinearLayout import LinearLayout
-
-layout = LinearLayout(activity)
-
-# Invokes: addView(View child)
-layout.addView(my_button)
-
-# Invokes: addView(View child, int index)
-layout.addView(my_button, 0)
-
-# Invokes: addView(View child, ViewGroup.LayoutParams params)
-layout.addView(my_button, custom_params)
+layout.addView(my_button)                       # addView(View)
+layout.addView(my_button, 0)                     # addView(View, int)
+layout.addView(my_button, custom_layout_params)   # addView(View, LayoutParams)
 ```
 
-### Varargs Auto-Packing
+Disambiguation checks argument **count** first, then the type of the first argument where the candidate overloads actually differ (primitive vs. string vs. boolean vs. another wrapped Java type, verified with a real `instanceof` check where possible). See [Troubleshooting](#overload-picked-the-wrong-method) if a call ever seems to hit the wrong overload.
 
-Methods that take variable arguments (`int...`, `String...`, `Object...`) can be called with ordinary unpacked Python arguments:
+### Varargs
+
+Java `int...`, `String...`, `Object...`, and primitive-array varargs parameters accept plain unpacked Python arguments — no need to build an array yourself:
 
 ```python
 from stratum.android.animation.ValueAnimator import ValueAnimator
-
-# Java: ValueAnimator.ofInt(int... values)
-# Automatically packed into a native int[]:
-animator = ValueAnimator.ofInt(0, 100, 250, 500)
+animator = ValueAnimator.ofInt(0, 100, 250, 500)   # Java: ofInt(int... values)
 ```
+
+### Constructors
+
+```python
+tv = TextView(activity)          # calls the matching Java constructor
+```
+
+If a class has **no public/protected constructor at all** (common for system classes obtained only via a factory — `CameraDevice`, `MediaCodec`, `Window`, …), constructing it directly raises `TypeError` telling you to use the relevant factory/service call instead. Use `activity.getSystemService(...)` or the appropriate `on*Opened`/`on*Created` callback for those classes.
+
+If the class *does* have constructors but you call it with an argument count that matches **none** of them, you'll get a clear native error about an argument-count mismatch rather than a Python-level `TypeError` — either way, the fix is to check the constructor signature you're targeting.
 
 ---
 
-## 4. Fields, Constants & Enums (`sf_get_*` / `f_get_*`)
+## 5. Fields & Constants
 
-Because Java fields are distinct from method tables, Stratum provides dedicated accessor functions:
-
-### Static Fields & Constants (`sf_get_<name>` / `sf_set_<name>`)
-
-Used for static configuration flags, layout dimensions, system constants, and enums:
+Static constants use `sf_get_*` / `sf_set_*`; instance fields use `f_get_*` / `f_set_*`. Only mutable (non-`final`) fields get a setter.
 
 ```python
 from stratum.android.view.View import View
 from stratum.android.widget.LinearLayout import LinearLayout
 from stratum.android.graphics.Color import Color
-from stratum.android.graphics.Paint_Style import Paint_Style
 from stratum.android.view.ViewGroup_LayoutParams import ViewGroup_LayoutParams
 
-# Visibility flags
-visible = View.sf_get_VISIBLE()        # View.VISIBLE
-gone    = View.sf_get_GONE()           # View.GONE
-
-# Layout orientations and parameters
+visible      = View.sf_get_VISIBLE()
+gone         = View.sf_get_GONE()
 vertical     = LinearLayout.sf_get_VERTICAL()
 match_parent = ViewGroup_LayoutParams.sf_get_MATCH_PARENT()
-wrap_content = ViewGroup_LayoutParams.sf_get_WRAP_CONTENT()
-
-# Static color constants
-color_red = Color.sf_get_RED()
-
-# Enum types
-style_fill   = Paint_Style.sf_get_FILL()
-style_stroke = Paint_Style.sf_get_STROKE()
+color_red    = Color.sf_get_RED()
 ```
 
-### Instance Fields (`f_get_<name>` / `f_set_<name>`)
-
-Used to read or modify fields on an instantiated object:
-
 ```python
-def on_sensor_changed(event):
-    # Reads the float[] array from SensorEvent.values:
-    vals = event.f_get_values()
-    accel_x = vals[0]
-    accel_y = vals[1]
-    accel_z = vals[2]
-
-    # Read timestamp (long)
-    timestamp = event.f_get_timestamp()
+# Assume `event` here is already a wrapped SensorEvent object
+# (see §7 for why callback parameters sometimes need wrapping first!)
+vals = event.f_get_values()          # float[] -> list[float]
+x, y, z = vals[0], vals[1], vals[2]
+timestamp = event.f_get_timestamp()  # long -> int
 ```
 
 ---
 
-## 5. Type Marshaling & Data Conversion
+## 6. Type Marshaling
 
-Stratum automatically marshals types across the Python-to-Java boundary.
+Stratum converts types automatically at the call boundary (both directions, for normal method calls and field access):
 
-### Type Mapping Reference
-
-| Java Type | Python Input Argument | Python Return Value |
-| :--- | :--- | :--- |
-| `boolean` / `java.lang.Boolean` | `bool` | `bool` |
-| `byte`, `short`, `int`, `long` | `int` | `int` |
-| `float`, `double` | `float` or `int` | `float` |
-| `String`, `CharSequence` | `str` | `str` |
+| Java type | Python argument | Python return |
+|---|---|---|
+| `boolean` / `Boolean` | `bool` | `bool` |
+| `byte`/`short`/`int`/`long` | `int` | `int` |
+| `float`/`double` | `float` or `int` | `float` |
+| `String` / `CharSequence` | `str` | `str` |
 | `byte[]` | `bytes`, `bytearray`, `memoryview` | `bytes` |
-| `int[]`, `long[]`, `short[]` | `list[int]` or `tuple[int]` | `list[int]` |
-| `float[]`, `double[]` | `list[float]` or `tuple[float]` | `list[float]` |
-| `boolean[]` | `list[bool]` or `tuple[bool]` | `list[bool]` |
-| `String[]` | `list[str]` or `tuple[str]` | `list[str]` |
-| `Object[]` | `list[Any]` or `tuple[Any]` | `list[Any]` |
-| `java.util.List` / `Collection` | `list`, `tuple`, `set` | `list` |
+| `int[]`/`long[]`/`short[]` | `list[int]` / `tuple[int]` | `list[int]` |
+| `float[]`/`double[]` | `list[float]` / `tuple[float]` | `list[float]` |
+| `boolean[]` | `list[bool]` / `tuple[bool]` | `list[bool]` |
+| `String[]` | `list[str]` / `tuple[str]` | `list[str]` |
+| `Object[]` | `list[Any]` / `tuple[Any]` | `list[Any]` |
+| `java.util.List`/`Collection` | `list`, `tuple`, `set` | `list` |
 | `java.util.Map` | `dict` | `dict` |
 
-### Deep Conversion Helpers
+This table describes normal **method calls and field access**. It does **not** describe what arrives as a listener/callback *argument* from Java — that's a narrower set of automatic conversions, covered in [§7](#7-event-listeners--callbacks).
 
-- `stratum.to_java(obj)`: Recursively converts Python structures (`dict`, `list`, primitive scalars) into real Java objects (`HashMap`, `ArrayList`, boxed primitives).
-- `stratum.to_py(obj)`: Recursively unboxes Java data structures (`Map`, `List`, `Bundle`, arrays) into native Python `dict`, `list`, `str`, `int`, etc.
-- `stratum.to_java_array(items, "com.example.Type")`: Constructs a strongly-typed native Java array (`T[]`).
+### Deep conversion helpers
 
-#### Example: Building a Typed Array
+```python
+stratum.to_java(py_obj)   # dict/list/scalars -> real HashMap/ArrayList/boxed primitives
+stratum.to_py(java_obj)   # Map/List/Bundle/arrays -> native dict/list/str/int/...
+stratum.to_java_array(items, "com.example.Type")   # strongly-typed T[] array
+```
 
-Certain Android APIs (such as Camera2 metering or custom graphics filters) expect an array of a concrete class rather than `Object[]`:
+Example — building a typed array for an API that needs a concrete element type rather than `Object[]`:
 
 ```python
 from stratum.android.graphics.Rect import Rect
@@ -283,101 +231,124 @@ from stratum.android.hardware.camera2.params.MeteringRectangle import MeteringRe
 focus_rect = Rect(0, 0, 100, 100)
 metering_rect = MeteringRectangle(focus_rect, 1000)
 
-# Build a native MeteringRectangle[] array:
 metering_array = stratum.to_java_array(
-    [metering_rect], 
+    [metering_rect],
     "android.hardware.camera2.params.MeteringRectangle"
 )
 ```
 
 ---
 
-## 6. Event Listeners & Callback Dispatch
+## 7. Event Listeners & Callbacks
 
-### Single-Method Listeners
-
-For functional interfaces (`View.OnClickListener`, `Runnable`), pass a regular Python function or lambda:
+### Single-method listeners → plain function or lambda
 
 ```python
-from stratum.android.widget.Button import Button
-
 btn = Button(activity)
 
 def handle_click(view):
     print("Button pressed!")
 
 btn.setOnClickListener(handle_click)
-# Or with a lambda:
+# or:
 btn.setOnClickListener(lambda v: print("Clicked!"))
 ```
 
-### Multi-Method Interfaces & Abstract Classes
-
-For listeners containing multiple methods or abstract classes with default implementations (`SensorEventListener`, `SurfaceTextureListener`, `CameraDevice.StateCallback`), pass a **Python dictionary mapping method names to functions**:
+### Multi-method interfaces / abstract callbacks → a `dict` of functions
 
 ```python
-from stratum.android.view.TextureView import TextureView
-
-texture_view = TextureView(activity)
-
-def on_available(surface_texture, width, height):
-    print(f"SurfaceTexture ready: {width}x{height}")
-
-def on_destroyed(surface_texture) -> bool:
-    print("SurfaceTexture destroyed")
-    return True  # Important: return value is forwarded back to Java!
-
 texture_view.setSurfaceTextureListener({
-    "onSurfaceTextureAvailable": on_available,
-    "onSurfaceTextureDestroyed": on_destroyed,
+    "onSurfaceTextureAvailable":   lambda st, w, h: print(f"ready {w}x{h}"),
+    "onSurfaceTextureDestroyed":   lambda st: True,   # return value forwarded to Java!
     "onSurfaceTextureSizeChanged": lambda st, w, h: None,
-    "onSurfaceTextureUpdated": lambda st: None,
+    "onSurfaceTextureUpdated":     lambda st: None,
 })
 ```
 
-### Return Values from Callbacks
+The dict's keys must exactly match the Java interface's method names. Every method the interface declares should be present — even as a no-op `lambda *a: None` — since Stratum's generated adapter always overrides all of them.
 
-If a Java callback expects a return value (such as `onTouch` or `onLongClick` returning a `boolean`), your Python function must return the appropriate type. The native bridge converts the return value back to Java automatically:
+### ⚠️ Object-typed callback parameters must be wrapped manually
+
+Only primitives (`bool`/`int`/`long`/`float`/`double`) and `String` are automatically converted when Android calls into a Python listener. **Any other object-typed parameter — `SensorEvent`, `CameraDevice`, `MotionEvent` on a raw listener, a `Session`, a `View`, etc. — arrives as a plain Python `int` (a raw pointer), not a usable wrapped object.**
+
+Calling a method directly on it fails with exactly this error:
+
+```
+AttributeError: 'int' object has no attribute 'f_get_values'
+```
+
+**Fix: wrap it yourself, first line of the callback, using `from_ptr` on the concrete class:**
+
+```python
+from stratum.android.hardware.SensorEvent import SensorEvent
+
+def on_sensor_changed(raw_event):
+    event = SensorEvent.from_ptr(raw_event)   # <-- wrap before using
+    values = event.f_get_values()
+    ...
+```
+
+If you don't know (or don't want to import) the concrete class, wrap by fully-qualified name instead:
+
+```python
+from stratum.core.stratum_object import _wrap_instance
+
+def on_sensor_changed(raw_event):
+    event = _wrap_instance(raw_event, "android.hardware.SensorEvent")
+    values = event.f_get_values()
+    ...
+```
+
+`None` is passed through as `None` (not `0`), so a truthiness/`is None` check is safe before wrapping if a parameter is nullable.
+
+This is exactly what the Camera2 example does with `CameraDevice.from_ptr(device)` and `CameraCaptureSession.from_ptr(session)` inside its `onOpened`/`onConfigured` callbacks — copy that pattern for **every** object-typed listener parameter.
+
+> **Exception — `stratum.ui.CustomCanvasView`:** the `canvas` parameter in `on_draw`, and the `event` parameter in `on_touch_event`, are **already wrapped for you automatically** by that helper class. The manual-wrapping rule above applies to listeners you register yourself (`setOnClickListener`, `setSurfaceTextureListener`, `registerListener`, and similar), not to `CustomCanvasView`'s own override methods. See [§9](#9-custom-2d-views-customcanvasview).
+
+### Return values matter
+
+If the Java callback expects a `boolean` (or other) return — `onTouch`, `onLongClick`, `Comparator.compare`, `onSurfaceTextureDestroyed` — your Python function's return value **is forwarded back to Java** and can change behavior (e.g. whether a touch/gesture is consumed):
 
 ```python
 def on_view_touch(view, motion_event) -> bool:
-    action = motion_event.getAction()
-    if action == 0:  # MotionEvent.ACTION_DOWN
-        print("Touch down detected")
-        return True   # Consumes the touch event
-    return False      # Event propagates to parent view
+    if motion_event.getAction() == 0:   # ACTION_DOWN
+        return True    # consume the event
+    return False        # let it propagate
 ```
+
+### Keeping a listener alive
+
+A Python closure/lambda passed as a listener is kept alive natively for as long as the *object you attached it to* is alive. You don't need to manually retain the function itself — but you **do** need to keep the object you called `setXxxListener(...)`/`registerListener(...)` on reachable from Python (see [Golden Rule](#golden-rule-retain-everything-you-need-later)), or the listener is silently unregistered when that object is garbage-collected.
+
+### <a name="managing-callback-memory"></a>Managing callback memory (advanced)
+
+Every listener you register consumes an entry in a native table that only frees itself when its owning object is garbage-collected (or you unregister it yourself). If your app registers a very large number of short-lived listeners, you can check and manage this manually:
+
+```python
+stratum.callback_count()                     # how many callbacks are currently retained
+stratum.remove_callback(key)                 # release one, if you tracked its key
+stratum.remove_callbacks_by_prefix(prefix)   # bulk release
+```
+
+This is rarely needed for typical apps — normal object garbage collection handles it — but is available if you're building something long-running with many dynamically created listeners.
 
 ---
 
-## 7. Thread Safety & UI Thread Dispatch
+## 8. Threading & the UI Thread
 
-Android enforces that UI modifications must occur strictly on the **Main Looper (UI thread)**. Modifying views from a background worker thread raises `android.view.ViewRootImpl$CalledFromWrongThreadException`.
-
-Stratum provides two execution mechanisms to handle this:
-
-### 1. `stratum.run_on_ui_thread(fn, *args, **kwargs)`
-
-Dispatches a callable directly to Android's main loop:
+Android requires all View mutations to happen on the **main looper**. Touching a view from a background thread raises `CalledFromWrongThreadException`.
 
 ```python
-import threading
-import time
-import stratum
+import threading, time, stratum
 
 def worker_thread():
     time.sleep(2.0)
-    result = "Background task complete"
-    
-    # Safely update the UI from the background thread:
-    stratum.run_on_ui_thread(status_label.setText, result)
+    stratum.run_on_ui_thread(status_label.setText, "Background task complete")
 
 threading.Thread(target=worker_thread, daemon=True).start()
 ```
 
-### 2. The `@stratum.ui_thread` Decorator
-
-Ensures that any invocation of the decorated function is scheduled on the UI thread:
+Or the decorator form:
 
 ```python
 @stratum.ui_thread
@@ -385,25 +356,32 @@ def display_alert(message: str, error: bool):
     status_label.setText(message)
     status_label.setTextColor(0xFFFF0000 if error else 0xFF00FF00)
 
-# Can be called from ANY thread safely:
-display_alert("Sync finished successfully", error=False)
+display_alert("Sync finished", error=False)   # safe from any thread
 ```
+
+> **Both forms are fire-and-forget.** The call is *posted* to the main looper and executed asynchronously — `run_on_ui_thread(...)` and a `@stratum.ui_thread`-decorated function both return `None` immediately, not whatever the wrapped function returns. Don't rely on getting a return value back from code run this way; have the function update shared state or call another callback instead if you need a result.
+
+> A listener callback invoked **directly by Android** (`onClick`, `onTouchEvent`, and — when registered without an explicit background `Handler` — sensor callbacks too) already runs *on* the thread that registered it, which is normally the UI thread if you registered from `onCreate`. You only need `run_on_ui_thread` when updating a view from code Android did **not** call for you: your own background `Thread`, a `queue` consumer, a timer, a network response callback, etc.
 
 ---
 
-## 8. Custom 2D Graphics & Views (`CustomCanvasView`)
+## 9. Custom 2D Views (`CustomCanvasView`)
 
-`CustomCanvasView` (from `stratum.ui`) provides a native bridge for hardware-accelerated 2D graphics, custom layouts, and touch interactions without writing Java code.
+This is Stratum's most reliable, fully-working feature end-to-end: real hardware-accelerated 2D drawing and touch handling, written entirely in Python, with **no Java view class needed**.
 
-### Methods to Override
+### What you override
 
-- `on_draw(self, canvas)`: Custom drawing using `android.graphics.Canvas` and `Paint`.
-- `on_touch_event(self, event) -> bool`: Handles raw touch events (`MotionEvent`). Return `True` to consume the gesture.
-- `on_measure(self, width_spec, height_spec)`: Optional custom measurement. Return a list of two ints `[width, height]` to report custom dimensions.
-- `on_layout(self, changed, left, top, right, bottom)`: Optional custom layout for child views.
-- `self.invalidate()`: Requests an immediate screen redraw.
+| Method | Purpose |
+|---|---|
+| `on_draw(self, canvas)` | Draw using `android.graphics.Canvas` / `Paint`. `canvas` is already a wrapped object — no manual `from_ptr` needed. Called whenever the view needs to redraw. |
+| `on_touch_event(self, event) -> bool` | Handle a `MotionEvent`. `event` is already a wrapped object. Return `True` to consume the gesture. |
+| `on_measure(self, width_spec, height_spec)` | *(optional)* `width_spec`/`height_spec` are plain ints. Return `[width, height]` (a list or tuple of two plain ints) to report a custom measured size, or `None` to use the default. |
+| `on_layout(self, changed, left, top, right, bottom)` | *(optional)* Custom layout of children. |
+| `self.invalidate()` | Request an immediate redraw (call after any state change you want reflected on screen). |
 
-### Example: Touch-Driven Vector Canvas
+Because `CustomCanvasView` is itself a `View` under the hood, real `View` methods (`setPadding`, `getWidth`, `setRotation`, etc.) are available directly on `self` — they're transparently delegated to the underlying Java `View`.
+
+### Example: touch-driven canvas *(fully working)*
 
 ```python
 import stratum
@@ -414,23 +392,17 @@ from stratum.android.graphics.Paint_Style import Paint_Style
 class ReticleView(CustomCanvasView):
     def __init__(self, activity):
         super().__init__(activity)
-
-        # Reticle ring paint
         self.ring_paint = Paint()
         self.ring_paint.setAntiAlias(True)
         self.ring_paint.setColor(0xFF00FFCC)
         self.ring_paint.setStrokeWidth(4.0)
         self.ring_paint.setStyle(Paint_Style.sf_get_STROKE())
 
-        # Coordinates
         self.x = 300.0
         self.y = 500.0
 
     def on_draw(self, canvas):
-        # 1. Clear background
         canvas.drawColor(0xFF121212)
-
-        # 2. Draw target reticle
         canvas.drawCircle(self.x, self.y, 75.0, self.ring_paint)
         canvas.drawLine(self.x - 100.0, self.y, self.x + 100.0, self.y, self.ring_paint)
         canvas.drawLine(self.x, self.y - 100.0, self.x, self.y + 100.0, self.ring_paint)
@@ -438,111 +410,96 @@ class ReticleView(CustomCanvasView):
     def on_touch_event(self, event) -> bool:
         self.x = float(event.getX())
         self.y = float(event.getY())
-        self.invalidate()  # Request immediate redraw
+        self.invalidate()   # redraw immediately with the new touch position
         return True
+
+# Module-level global — required, see "Retain Your Roots" below
+reticle_view = None
+
+def onCreate():
+    global reticle_view
+    activity = stratum.getActivity()
+    reticle_view = ReticleView(activity)
+    stratum.setContentView(activity, reticle_view)
 ```
+
+Run this, tap/drag on screen — the ring follows your finger in real time. This pattern (state on `self`, mutate in a callback, call `self.invalidate()`) is the recommended way to build *any* interactive Stratum UI element, and is currently more reliable than driving a stock `TextView`/`Button` tree for anything beyond static layout — see [Troubleshooting](#a-view-doesnt-update-after-the-initial-draw).
+
+> `CustomCanvasView` must be constructed after the Activity is available (i.e. inside or after `onCreate()`) — constructing it too early raises `RuntimeError: Stratum: failed to construct StratumView (activity not ready?)`.
 
 ---
 
-## 9. Direct ByteBuffers & Zero-Copy Native Memory
+## 10. Direct ByteBuffers & Zero-Copy Memory
 
-When processing large datasets (audio PCM streams, camera frames, bitmap pixel buffers), copying data through JNI is inefficient. Stratum provides direct memory mapping using Python's standard `memoryview` interface without requiring external libraries.
-
-### Allocating and Mapping Native Buffers
+For large buffers (audio PCM, camera frames, bitmap pixels), Stratum maps native memory directly into a Python `memoryview` — no JNI copy.
 
 ```python
 import stratum
 
-# 1. Allocate 1MB of direct off-heap native memory in the JVM
-byte_buffer = stratum.allocate_direct_buffer(1024 * 1024)
-
-# 2. Extract a zero-copy Python memoryview of the native address
+byte_buffer = stratum.allocate_direct_buffer(1024 * 1024)          # 1 MB off-heap, wrapped object
 raw_view = stratum._stratum.bytebuffer_to_memoryview(byte_buffer._ptr)
 
-# raw_view is a standard Python memoryview:
-print(f"Allocated native bytes: {len(raw_view)}")
-
-# 3. Modify bytes directly in native memory using standard slicing:
-raw_view[0:4] = b"\x00\xFF\x00\xFF"  # Updates Java memory immediately
+print(len(raw_view))
+raw_view[0:4] = b"\x00\xFF\x00\xFF"   # writes directly into Java-visible memory
 ```
 
-### Bitmaps and Pixel Buffers
+`stratum._stratum` here is the underlying native extension module (its Python-facing name starts with an underscore because it's normally an implementation detail) — `bytebuffer_to_memoryview` has no separate high-level wrapper, so this direct call is the documented way to use it.
 
-You can copy pixel buffers directly between Android `Bitmap` objects and direct `ByteBuffer` instances:
+Bitmap pixel round-trip:
 
 ```python
-# Copy bitmap pixels into direct memory:
 byte_buffer.rewind()
 bitmap.copyPixelsToBuffer(byte_buffer)
 
-# Manipulate or inspect pixels via standard Python memoryview:
 view = stratum._stratum.bytebuffer_to_memoryview(byte_buffer._ptr)
 first_pixel_alpha = view[3]
 
-# Copy processed pixels back to an output bitmap:
 byte_buffer.rewind()
 bitmap.copyPixelsFromBuffer(byte_buffer)
 ```
 
-### Native Surface Window Pointers
-
-For direct rendering with native pipelines, obtain an `ANativeWindow*` handle:
+Native surface windows (for direct rendering pipelines):
 
 ```python
-# Acquire raw pointer to the native window
 win_ptr = stratum.surface_to_native_window(surface)
-
-# ... interact with native window ...
-
-# Always release the reference when finished
-stratum.release_native_window(win_ptr)
+# ... use with native rendering code ...
+stratum.release_native_window(win_ptr)   # always release when done
 ```
 
 ---
 
-## 10. Type Casting & Object Identity
+## 11. Casting & Object Identity
 
-### Downcasting (`from_ptr` / `stratum_cast`)
-
-When an Android framework API returns a generic base class (such as `Context.getSystemService(...)` returning `Object`), downcast it to its concrete type:
+### Downcasting
 
 ```python
-import stratum
 from stratum.android.hardware.SensorManager import SensorManager
 
 raw_service = activity.getSystemService("sensor")
-
-# Method 1: Using the target class from_ptr method (Recommended)
-sensor_mgr = SensorManager.from_ptr(raw_service)
-
-# Method 2: Using the top-level helper
+sensor_mgr = SensorManager.from_ptr(raw_service)          # verified via IsInstanceOf
+# equivalent:
 sensor_mgr = stratum.stratum_cast(raw_service, SensorManager)
 ```
 
-Both methods verify inheritance using native JNI `IsInstanceOf` checks and will raise a `TypeError` if the instance does not match the target class.
+`from_ptr` / `stratum_cast` raise `TypeError` if the underlying object isn't actually an instance of the target class — this is a real JNI check, not a blind cast. This is also the exact mechanism used to fix the raw-pointer callback problem described in [§7](#-object-typed-callback-parameters-must-be-wrapped-manually).
 
-### Object Identity (`==`)
-
-Stratum overrides equality (`==`) on `StratumObject` instances to check whether two distinct Python wrappers reference the **exact same underlying Java object** using JNI `IsSameObject`:
+### Identity vs. equality
 
 ```python
-child_view1 = layout.getChildAt(0)
-child_view2 = layout.getChildAt(0)
-
-# True: They are different Python wrappers, but share the same Java reference
-if child_view1 == child_view2:
-    print("Same native Java object reference")
+child1 = layout.getChildAt(0)
+child2 = layout.getChildAt(0)
+child1 == child2   # True — same underlying Java object (JNI IsSameObject), even though
+                     # child1 and child2 are two *different* Python wrapper instances
 ```
 
 ---
 
-## 11. Calling Python from Java (`@stratum.export`)
+## 12. Calling Python from Java
 
-You can expose Python functions to be invoked by custom Java code:
-
-### 1. In Python (`main.py`):
+If you have hand-written Java in your Android Studio project, it can call back into Python:
 
 ```python
+# main.py
 import stratum
 
 @stratum.export
@@ -551,58 +508,46 @@ def process_message(sender: str, message: str) -> str:
     return f"Acknowledged: {message.upper()}"
 ```
 
-### 2. In Java:
-
 ```java
+// your custom Java class
 import com.stratum.runtime.StratumRuntimeLookup;
 
 Object result = StratumRuntimeLookup.callPython("process_message", "Alice", "System check");
-// result contains "Acknowledged: SYSTEM CHECK"
+// result == "Acknowledged: SYSTEM CHECK"
 ```
 
 ---
 
-## 12. Dynamic Reflection Escape Hatch (`stratum.reflect`)
+## 13. The Reflection Escape Hatch
 
-If your project uses custom `.java` files compiled in Android Studio or system APIs that were excluded from the generated wrapper set, you can call them dynamically using `stratum.reflect`:
+For classes excluded from your build (custom `.java` files, or SDK members filtered out of the pipeline run), `stratum.reflect` calls them dynamically without touching the pipeline:
 
 ```python
 from stratum import reflect
 
-# 1. Call a static method by fully qualified class name:
 result = reflect.call_java_static(
-    "com.example.utils.EncryptionHelper",
-    "sha256",
-    "my_payload_data"
+    "com.example.utils.EncryptionHelper", "sha256", "my_payload_data"
 )
 
-# 2. Call an instance method on any wrapped Java object:
 output = reflect.call_java_method(
-    my_java_instance,
-    "performCustomAction",
-    100,
-    True
+    my_java_instance, "performCustomAction", 100, True
 )
 ```
 
+This is slower than a normal Stratum call (real Java reflection under the hood) — use it for occasional/one-off calls, not hot paths. It also requires the classes `java.lang.Class`, `java.lang.ClassLoader`, and `java.lang.reflect.*` to have been included in your build; if `stratum.reflect` itself fails to import a needed class, the error message tells you which FQN to add to `05_resolve/targets.json`.
+
 ---
 
-## 13. Working with XML Layouts & Android Resources
+## 14. XML Layouts (read this before using)
 
-Stratum integrates with standard Android XML layouts and resources declared in your project's `res/` directory.
-
-### Inflating an XML Layout
-
-To inflate an XML layout (e.g., `res/layout/activity_main.xml`):
+Stratum can inflate a `res/layout/*.xml` file the same way native Android code does:
 
 ```python
 import stratum
 from stratum.android.widget.FrameLayout import FrameLayout
 from stratum.android.widget.TextView import TextView
-from stratum.android.widget.Button import Button
 
 def get_res_id(activity, res_name: str, res_type: str = "id") -> int:
-    """Finds an Android R.<type>.<name> integer ID at runtime."""
     res = activity.getResources()
     pkg = activity.getPackageName()
     res_id = res.getIdentifier(res_name, res_type, pkg)
@@ -614,380 +559,217 @@ def onCreate():
     activity = stratum.getActivity()
     inflater = activity.getLayoutInflater()
 
-    # 1. Find layout resource ID for R.layout.activity_main
     layout_id = get_res_id(activity, "activity_main", "layout")
-
-    # 2. Inflate layout and mount to activity
     root_view = FrameLayout.from_ptr(inflater.inflate(layout_id, None, False))
     stratum.setContentView(activity, root_view)
 
-    # 3. Find nested views by their R.id.<name>
     text_view_id = get_res_id(activity, "title_text", "id")
     title_tv = TextView.from_ptr(root_view.findViewById(text_view_id))
     title_tv.setText("Bound via Stratum XML Inflation")
-
-    button_id = get_res_id(activity, "action_button", "id")
-    btn = Button.from_ptr(root_view.findViewById(button_id))
-    btn.setOnClickListener(lambda v: title_tv.setText("Button Clicked!"))
 ```
+
+> ⚠️ **This path is currently the least battle-tested part of the API and has been observed to crash in some projects.** Before filing an issue, check every item below — in practice, most "XML inflate crash" reports trace back to one of these:
+>
+> 1. **`res_name` must be the *bare* resource name with no prefix** — `"activity_main"`, not `"R.layout.activity_main"` and not `"@layout/activity_main"`.
+> 2. **The resource must actually be compiled into the APK's `R` class** for the exact `applicationId`/package `activity.getPackageName()` returns — a resource that only exists in a different `productFlavor`/`buildType` than the one installed resolves to `0` and raises `KeyError` here (that's the intended, safe failure mode — if you instead see a native crash, the inflate got *past* ID resolution and something else is wrong).
+> 3. **Every custom View referenced by the XML must be a real Java class the inflater can construct via `(Context, AttributeSet)`.** A layout that references a Stratum-only Python view (like `CustomCanvasView`) **cannot** be inflated from XML — Python classes have no Java bytecode for the inflater to instantiate. Build those parts of the tree programmatically (see [§9](#9-custom-2d-views-customcanvasview)) and inflate only the parts that use stock Android widgets.
+> 4. **`from_ptr(...)` needs the target class to actually be part of your build.** If it was excluded from `05_resolve/targets.json` when the wheel was built, `from_ptr` falls back to a generic `StratumObject` (not a crash) — but downstream code expecting `TextView`-specific methods on that fallback will then fail with `AttributeError`.
+> 5. If you still see a native crash (not a Python exception) on inflate, capture `adb logcat` around the crash and narrow the XML down by commenting out children until it disappears, then check that specific widget's constructor/attributes.
+>
+> **Until this is fully hardened, building layouts programmatically is the safer path for anything you need to ship today**; treat XML inflation as experimental.
 
 ---
 
-## 14. Complete Production-Grade Examples
+## 15. Worked Examples (Known-Good)
 
-### Example 1: Pure Programmatic UI & Asynchronous Worker
+These are verified working end-to-end and are good starting points to copy from.
 
-A complete, standalone application featuring vertical layouts, styling, click counters, and a background thread updating the UI safely.
+### Example A — Interactive Touch Canvas *(fully working)*
+See [§9](#example-touch-driven-canvas-fully-working) above — `ReticleView`-style drawing + touch tracking with `invalidate()`.
 
-```python
-import time
-import threading
-import stratum
-
-from stratum.android.widget.LinearLayout import LinearLayout
-from stratum.android.widget.TextView import TextView
-from stratum.android.widget.Button import Button
-from stratum.android.view.ViewGroup_LayoutParams import ViewGroup_LayoutParams
-
-# Keep references in global scope to prevent garbage collection
-app_layout = None
-counter_tv = None
-uptime_tv = None
-
-click_count = 0
-running = True
-
-def on_click_increment(view):
-    global click_count
-    click_count += 1
-    counter_tv.setText(f"Button Clicks: {click_count}")
-
-def background_clock():
-    seconds = 0
-    while running:
-        time.sleep(1.0)
-        seconds += 1
-        # Safely post text update to UI thread:
-        stratum.run_on_ui_thread(uptime_tv.setText, f"Service Uptime: {seconds}s")
-
-def onCreate():
-    global app_layout, counter_tv, uptime_tv
-    activity = stratum.getActivity()
-
-    # 1. Root Vertical Layout
-    app_layout = LinearLayout(activity)
-    app_layout.setOrientation(LinearLayout.sf_get_VERTICAL())
-    app_layout.setPadding(60, 100, 60, 60)
-    app_layout.setBackgroundColor(0xFF1E1E1E)
-
-    # Layout params
-    match_parent = ViewGroup_LayoutParams.sf_get_MATCH_PARENT()
-    wrap_content = ViewGroup_LayoutParams.sf_get_WRAP_CONTENT()
-
-    # 2. Title Label
-    title_tv = TextView(activity)
-    title_tv.setText("Stratum Native Dashboard")
-    title_tv.setTextSize(26.0)
-    title_tv.setTextColor(0xFF00FFCC)
-    title_tv.setPadding(0, 0, 0, 40)
-    app_layout.addView(title_tv)
-
-    # 3. Counter Display
-    counter_tv = TextView(activity)
-    counter_tv.setText("Button Clicks: 0")
-    counter_tv.setTextSize(18.0)
-    counter_tv.setTextColor(0xFFFFFFFF)
-    counter_tv.setPadding(0, 0, 0, 20)
-    app_layout.addView(counter_tv)
-
-    # 4. Action Button
-    action_btn = Button(activity)
-    action_btn.setText("Increment Counter")
-    action_btn.setOnClickListener(on_click_increment)
-    app_layout.addView(action_btn)
-
-    # 5. Uptime Label
-    uptime_tv = TextView(activity)
-    uptime_tv.setText("Service Uptime: 0s")
-    uptime_tv.setTextSize(16.0)
-    uptime_tv.setTextColor(0xFFAAAAAA)
-    uptime_tv.setPadding(0, 40, 0, 0)
-    app_layout.addView(uptime_tv)
-
-    # 6. Mount Layout
-    stratum.setContentView(activity, app_layout)
-
-    # 7. Start Background Thread
-    threading.Thread(target=background_clock, daemon=True).start()
-
-def onDestroy():
-    global running
-    running = False
-```
-
----
-
-### Example 2: Hardware Sensor Listener (Accelerometer HUD)
-
-Demonstrates registering hardware sensor listeners using multi-method interface dictionaries, unboxing floating-point sensor arrays, and dynamically modifying views.
+### Example B — Hardware Sensor Listener (Accelerometer)
 
 ```python
 import stratum
-
 from stratum.android.widget.LinearLayout import LinearLayout
 from stratum.android.widget.TextView import TextView
 from stratum.android.hardware.SensorManager import SensorManager
-from stratum.android.hardware.Sensor import Sensor
+from stratum.android.hardware.SensorEvent import SensorEvent
 
-# Retain globals
 app_layout = None
 accel_x_tv = None
 accel_y_tv = None
 accel_z_tv = None
-sensor_manager = None
+sensor_manager = None   # MUST stay a global — see §2 / Golden Rule
 
-def on_sensor_changed(event):
-    # Unpack float array from native SensorEvent:
+def on_sensor_changed(raw_event):
+    # raw_event arrives as a bare int (a raw JNI pointer), not a usable
+    # SensorEvent object — wrap it first. See §7.
+    event = SensorEvent.from_ptr(raw_event)
     values = event.f_get_values()
     x, y, z = values[0], values[1], values[2]
 
-    # Update labels on UI thread
-    accel_x_tv.setText(f"Axis X: {x:+.3f} m/s²")
-    accel_y_tv.setText(f"Axis Y: {y:+.3f} m/s²")
-    accel_z_tv.setText(f"Axis Z: {z:+.3f} m/s²")
+    # Registered without an explicit background Handler, so this callback
+    # runs on the thread that called registerListener() — the UI thread,
+    # since registration happens inside onCreate(). Direct setText() calls
+    # are therefore safe here. If you ever register with a background
+    # Handler instead, wrap these calls in stratum.run_on_ui_thread(...).
+    accel_x_tv.setText(f"Axis X: {x:+.3f} m/s^2")
+    accel_y_tv.setText(f"Axis Y: {y:+.3f} m/s^2")
+    accel_z_tv.setText(f"Axis Z: {z:+.3f} m/s^2")
 
 def onCreate():
     global app_layout, accel_x_tv, accel_y_tv, accel_z_tv, sensor_manager
     activity = stratum.getActivity()
 
-    # Layout construction
     app_layout = LinearLayout(activity)
     app_layout.setOrientation(LinearLayout.sf_get_VERTICAL())
     app_layout.setPadding(60, 100, 60, 60)
-    app_layout.setBackgroundColor(0xFF0F172A)
 
-    title = TextView(activity)
-    title.setText("Live Accelerometer Monitor")
-    title.setTextSize(22.0)
-    title.setTextColor(0xFF38BDF8)
-    title.setPadding(0, 0, 0, 40)
-    app_layout.addView(title)
-
-    accel_x_tv = TextView(activity)
-    accel_x_tv.setTextSize(18.0)
-    accel_x_tv.setTextColor(0xFFF1F5F9)
-    app_layout.addView(accel_x_tv)
-
-    accel_y_tv = TextView(activity)
-    accel_y_tv.setTextSize(18.0)
-    accel_y_tv.setTextColor(0xFFF1F5F9)
-    app_layout.addView(accel_y_tv)
-
-    accel_z_tv = TextView(activity)
-    accel_z_tv.setTextSize(18.0)
-    accel_z_tv.setTextColor(0xFFF1F5F9)
-    app_layout.addView(accel_z_tv)
+    accel_x_tv = TextView(activity); app_layout.addView(accel_x_tv)
+    accel_y_tv = TextView(activity); app_layout.addView(accel_y_tv)
+    accel_z_tv = TextView(activity); app_layout.addView(accel_z_tv)
 
     stratum.setContentView(activity, app_layout)
 
-    # Obtain SensorManager
     raw_service = activity.getSystemService("sensor")
     sensor_manager = SensorManager.from_ptr(raw_service)
-
     if sensor_manager:
-        # TYPE_ACCELEROMETER = 1
-        accelerometer = sensor_manager.getDefaultSensor(1)
+        accelerometer = sensor_manager.getDefaultSensor(1)   # TYPE_ACCELEROMETER
         if accelerometer:
             sensor_manager.registerListener({
                 "onSensorChanged": on_sensor_changed,
                 "onAccuracyChanged": lambda sensor, accuracy: None,
-            }, accelerometer, 3)  # SENSOR_DELAY_NORMAL = 3
+            }, accelerometer, 3)   # SENSOR_DELAY_NORMAL
 ```
 
----
+### Example C — Camera2 Preview (why `from_ptr` shows up in the official demo)
 
-### Example 3: Interactive Touch Vector Canvas (`CustomCanvasView`)
-
-Demonstrates interactive 2D geometry drawing, touch coordinate tracking, and immediate frame invalidation.
+The Camera2 example elsewhere in this repo wraps every object-typed callback parameter as soon as it receives it:
 
 ```python
-import stratum
-from stratum.ui import CustomCanvasView
-from stratum.android.graphics.Paint import Paint
-from stratum.android.graphics.Paint_Style import Paint_Style
-
-class RadarView(CustomCanvasView):
-    def __init__(self, activity):
-        super().__init__(activity)
-
-        # Background grid paint
-        self.grid_paint = Paint()
-        self.grid_paint.setAntiAlias(True)
-        self.grid_paint.setColor(0xFF006633)
-        self.grid_paint.setStrokeWidth(3.0)
-        self.grid_paint.setStyle(Paint_Style.sf_get_STROKE())
-
-        # Primary reticle paint
-        self.reticle_paint = Paint()
-        self.reticle_paint.setAntiAlias(True)
-        self.reticle_paint.setColor(0xFF00FF66)
-        self.reticle_paint.setStrokeWidth(5.0)
-        self.reticle_paint.setStyle(Paint_Style.sf_get_STROKE())
-
-        # Touch indicator blip paint
-        self.blip_paint = Paint()
-        self.blip_paint.setAntiAlias(True)
-        self.blip_paint.setColor(0x8800FF66)
-        self.blip_paint.setStyle(Paint_Style.sf_get_FILL())
-
-        # Text paint
-        self.text_paint = Paint()
-        self.text_paint.setAntiAlias(True)
-        self.text_paint.setColor(0xFF00FF66)
-        self.text_paint.setTextSize(36.0)
-
-        # Default center
-        self.touch_x = 400.0
-        self.touch_y = 600.0
-
-    def on_draw(self, canvas):
-        # 1. Fill dark canvas background
-        canvas.drawColor(0xFF0A0F0D)
-
-        w = float(self.getWidth()) if self.getWidth() > 0 else 800.0
-        h = float(self.getHeight()) if self.getHeight() > 0 else 1200.0
-        cx = w / 2.0
-        cy = h / 2.0
-
-        # 2. Draw concentric radar range circles
-        for radius in (150.0, 300.0, 450.0, 600.0):
-            canvas.drawCircle(cx, cy, radius, self.grid_paint)
-
-        # Draw crosshairs
-        canvas.drawLine(cx, cy - 650.0, cx, cy + 650.0, self.grid_paint)
-        canvas.drawLine(cx - 450.0, cy, cx + 450.0, cy, self.grid_paint)
-
-        # 3. Draw active touch target
-        canvas.drawCircle(self.touch_x, self.touch_y, 50.0, self.blip_paint)
-        canvas.drawCircle(self.touch_x, self.touch_y, 50.0, self.reticle_paint)
-        canvas.drawCircle(self.touch_x, self.touch_y, 8.0, self.reticle_paint)
-
-        # 4. Draw HUD text metrics
-        canvas.drawText("TACTICAL TOUCH MONITOR", 50.0, 100.0, self.text_paint)
-        canvas.drawText(f"X: {int(self.touch_x)}  Y: {int(self.touch_y)}", 50.0, 160.0, self.text_paint)
-
-    def on_touch_event(self, event) -> bool:
-        self.touch_x = float(event.getX())
-        self.touch_y = float(event.getY())
-        self.invalidate()  # Trigger on_draw immediately
-        return True
-
-# Retain globally
-canvas_app = None
-
-def onCreate():
-    global canvas_app
-    activity = stratum.getActivity()
-    canvas_app = RadarView(activity)
-    stratum.setContentView(activity, canvas_app)
-```
-
----
-
-### Example 4: Camera2 Hardware Preview Pipeline
-
-Demonstrates controlling device camera hardware: handling `TextureView` surface callbacks, calculating coordinate transforms, opening a `CameraDevice`, and initiating a `CameraCaptureSession`.
-
-```python
-import stratum
-
-from stratum.android.view.TextureView import TextureView
-from stratum.android.view.Surface import Surface
-from stratum.android.graphics.SurfaceTexture import SurfaceTexture
-from stratum.android.graphics.Matrix import Matrix
-from stratum.android.hardware.camera2.CameraManager import CameraManager
-from stratum.android.hardware.camera2.CameraDevice import CameraDevice
-from stratum.android.hardware.camera2.CaptureRequest import CaptureRequest
-from stratum.android.hardware.camera2.CameraCaptureSession import CameraCaptureSession
-from stratum.android.os.Looper import Looper
-from stratum.android.os.Handler import Handler
-
-# Retained handles
-viewfinder = None
-camera_device = None
-capture_session = None
-handler = None
-
 def on_camera_opened(device):
-    global camera_device, capture_session
-    camera_device = CameraDevice.from_ptr(device)
+    camera_device = CameraDevice.from_ptr(device)      # device arrives as a raw int
 
-    # 1. Acquire Surface from TextureView
-    st = SurfaceTexture.from_ptr(viewfinder.getSurfaceTexture())
-    st.setDefaultBufferSize(1280, 720)
-    surface = Surface(st)
-
-    # 2. Build Repeating CaptureRequest
-    # TEMPLATE_PREVIEW = 1
-    builder = camera_device.createCaptureRequest(1)
-    builder.addTarget(surface)
-
-    # CONTROL_AF_MODE_CONTINUOUS_PICTURE = 4
-    af_mode_key = CaptureRequest.sf_get_CONTROL_AF_MODE()
-    builder.set(af_mode_key, 4)
-
-    def on_session_configured(session):
-        global capture_session
-        capture_session = CameraCaptureSession.from_ptr(session)
-        # Start repeating preview request
-        capture_session.setRepeatingRequest(builder.build(), None, handler)
-
-    # 3. Create CameraCaptureSession
-    camera_device.createCaptureSession([surface], {
-        "onConfigured": on_session_configured,
-        "onConfigureFailed": lambda s: None,
-    }, handler)
-
-def on_surface_available(surface_texture, width, height):
-    global handler
-    activity = stratum.getActivity()
-
-    # Main Looper Handler
-    handler = Handler(Looper.getMainLooper())
-
-    # Obtain CameraManager
-    raw_mgr = activity.getSystemService("camera")
-    cam_mgr = CameraManager.from_ptr(raw_mgr)
-
-    # Get camera ID list
-    cam_ids = cam_mgr.getCameraIdList()
-    if len(cam_ids) > 0:
-        primary_camera = str(cam_ids[0])
-        # Open hardware camera
-        cam_mgr.openCamera(primary_camera, {
-            "onOpened": on_camera_opened,
-            "onDisconnected": lambda dev: None,
-            "onError": lambda dev, err: None,
-        }, handler)
-
-def onCreate():
-    global viewfinder
-    activity = stratum.getActivity()
-
-    viewfinder = TextureView(activity)
-    viewfinder.setSurfaceTextureListener({
-        "onSurfaceTextureAvailable": on_surface_available,
-        "onSurfaceTextureSizeChanged": lambda st, w, h: None,
-        "onSurfaceTextureDestroyed": lambda st: True,
-        "onSurfaceTextureUpdated": lambda st: None,
-    })
-
-    stratum.setContentView(activity, viewfinder)
-
-def onDestroy():
-    global capture_session, camera_device
-    if capture_session:
-        capture_session.close()
-    if camera_device:
-        camera_device.close()
+def on_session_configured(session):
+    capture_session = CameraCaptureSession.from_ptr(session)  # same reason
 ```
+
+This is the same rule as Example B — `device` and `session` are object-typed parameters delivered by a Java callback, so they arrive unwrapped. There's nothing camera-specific about it; the same fix applies to *every* listener callback parameter that isn't a primitive or a `String`.
+
+**The pattern that reliably works, across all three examples:** module-level globals for every long-lived object, a plain function/lambda or dict-of-functions for the listener, `from_ptr`/`_wrap_instance` on the first line of any callback that receives an object parameter, and `self.invalidate()` / direct `setText` calls from inside the callback rather than from an unrelated background loop.
+
+---
+
+## 16. Troubleshooting & Common Pitfalls
+
+### Golden Rule: retain everything you need later
+When a Python wrapper is garbage-collected, it releases its JNI reference **and unregisters every callback that was attached through it.** So anything you build in `onCreate` and expect to still be working later — a view you'll keep updating, a `SensorManager`, a `CameraDevice`, a `Handler` — must be kept reachable: a module-level `global`, an attribute on a long-lived object, or an entry in a list you don't clear. If a listener "randomly stops firing" a few seconds after registration with no error, this is the first thing to check.
+
+```python
+# RISKY — nothing keeps `sensor_manager` alive after onCreate() returns,
+# so its listener registration can silently be torn down later.
+def onCreate():
+    activity = stratum.getActivity()
+    raw = activity.getSystemService("sensor")
+    sensor_manager = SensorManager.from_ptr(raw)
+    sensor_manager.registerListener({...}, accel, 3)
+
+# CORRECT
+sensor_manager = None
+def onCreate():
+    global sensor_manager
+    activity = stratum.getActivity()
+    raw = activity.getSystemService("sensor")
+    sensor_manager = SensorManager.from_ptr(raw)
+    sensor_manager.registerListener({...}, accel, 3)
+```
+
+### A view doesn't update after the initial draw
+If a `setText()`/`setXxx()` call from inside a click handler or a background-thread callback doesn't visibly update the screen:
+
+1. **Check the object is kept alive** (Golden Rule above) — a collected-and-recreated or collected-listener-owner will silently no-op.
+2. **Check the callback actually fired** — add a `print(...)` at the top of the handler. If it never prints, the listener isn't firing (often an object-lifetime issue on the object you registered it on, not the widget you're trying to update).
+3. **If the update comes from a non-Android-driven thread** (your own `threading.Thread`, a timer, a queue consumer), it **must** go through `stratum.run_on_ui_thread(...)` — a cross-thread view mutation can fail silently depending on device/OS version instead of raising a catchable Python exception.
+4. **Check `adb logcat`**, not just your Python process's stdout — a Python exception raised inside a callback is logged there (`Stratum` tag) and can crash the app via a native `RuntimeException`, as shown in the sensor example crash log at the top of this guide. Filter with `adb logcat -s Stratum StratumTrace`.
+5. If a listener parameter is object-typed, confirm you wrapped it with `from_ptr`/`_wrap_instance` — an un-wrapped raw int silently fails differently (an `AttributeError`, which *will* show up in logcat and crash the app — see item 4).
+6. As a robustness check, try the `CustomCanvasView` pattern from [§9](#9-custom-2d-views-customcanvasview) for that piece of UI — since that code path is the most exercised part of Stratum, it's a good way to rule in/out whether the issue is specific to the standard widget tree.
+
+### `AttributeError: 'int' object has no attribute 'f_get_...'` / `'...setXxx'` inside a listener
+You're calling a method on a callback parameter that Stratum handed you as a raw pointer `int` instead of a wrapped object. This happens for **every** non-primitive, non-`String` parameter delivered to a listener you registered (`SensorEvent`, `CameraDevice`, a `Session`, etc.) — see [§7](#-object-typed-callback-parameters-must-be-wrapped-manually). Fix: wrap the parameter with `YourClass.from_ptr(raw_value)` (or `_wrap_instance(raw_value, "fully.qualified.Name")`) as the very first line of the callback, before touching it. Parameters delivered to `CustomCanvasView`'s own `on_draw`/`on_touch_event` are the one exception — those arrive pre-wrapped.
+
+### Overload picked the "wrong" method
+Overload resolution checks argument **count** first, then the concrete Python type of the first argument that actually differs between candidates. If a method with many overloads behaves unexpectedly:
+- Check you're not passing `True`/`False` where Java expects an `int` (or vice versa) — Python's `bool` is technically an `int` subclass, which Stratum accounts for, but it's a common source of confusion when reading traces.
+- Prefer passing values with the type Java actually expects rather than relying on Python's numeric coercion (`1.0` vs `1`) when a class has both an `int` and a `float` overload.
+
+### `IllegalArgumentException` when passing a listener
+Java's dynamic proxies can only implement **interfaces**, not abstract classes. If you're passing a Python function/dict to a parameter typed as an **abstract class** (`CameraDevice.StateCallback`, `WebViewClient`, etc.) rather than a plain interface, that class needs a **generated Java adapter** (produced by pipeline Stage 05.5) instead of a dynamic proxy. This is a build-time concern — if you hit it, the class needs to be added to `05_5_abstract/targets.json`'s seed list and the wheel rebuilt.
+
+### A constructor raises `TypeError: ... has no accessible constructor`
+This is intentional — some Android classes are only ever obtained through a factory method or system service (`CameraDevice`, `MediaCodec`, `Window`, …), never constructed directly. Use the appropriate `getSystemService(...)` call or the relevant `on*Opened`/`on*Created` callback instead.
+
+### Nothing happens and there's no error at all
+Check `adb logcat -s Stratum StratumTrace` — Stratum's native layer logs class-resolution failures, methods unavailable on the current device's API level, and Python exceptions raised inside callbacks there, even when nothing propagates back to a visible Python traceback in your own tooling. A large volume of `method unavailable on this device` / `field unavailable` warnings on startup is normal and harmless — it just means that specific member doesn't exist on your device's Android version; the real problem, if any, is the line marked `E` (error) that follows, if there is one. Enable deep tracing with `stratum.set_log_enabled(True)` (only meaningful if the engine was compiled with logging support) to see every call crossing the Python ⇄ Java boundary.
+
+### XML layouts
+See the dedicated warning list in [§14](#14-xml-layouts-read-this-before-using) — this is the most fragile part of the current API. Prefer building view trees programmatically until you've ruled out each item on that list.
+
+---
+
+## 17. Quick Reference Cheat Sheet
+
+```python
+# Imports — always fully qualified
+from stratum.android.widget.TextView import TextView
+from stratum.android.view.View_OnClickListener import View_OnClickListener   # inner class -> "_"
+
+# Construct / call / alias
+tv = TextView(activity)
+tv.setText("x"); tv.set_text("x")            # same call
+
+# Fields
+View.sf_get_VISIBLE()                          # static
+event.f_get_values()                           # instance (event must already be wrapped!)
+
+# Listeners
+btn.setOnClickListener(lambda v: ...)          # single-method
+obj.setListener({"onA": fn_a, "onB": fn_b})     # multi-method
+
+# Object-typed callback params need wrapping — see §7
+def on_something(raw_obj):
+    obj = SomeClass.from_ptr(raw_obj)
+
+# Threading — both are fire-and-forget, return None immediately
+stratum.run_on_ui_thread(view.setText, "x")
+@stratum.ui_thread
+def safe_update(): ...
+
+# Casting
+X.from_ptr(some_object)                         # verified downcast
+stratum.stratum_cast(some_object, X)
+
+# Data
+stratum.to_java(py_dict_or_list)
+stratum.to_py(java_map_or_list)
+stratum.to_java_array(items, "java.lang.String")
+
+# Custom drawing — canvas/event are pre-wrapped here, no from_ptr needed
+class MyView(stratum.ui.CustomCanvasView):
+    def on_draw(self, canvas): ...
+    def on_touch_event(self, event) -> bool: ...
+
+# Python <-> Java
+@stratum.export
+def my_fn(x): return x
+
+from stratum import reflect
+reflect.call_java_static("com.example.Foo", "bar", 1, 2)
+
+# Keep every long-lived object as a module-level global — this is the
+# single most common source of "it silently stopped working" reports.
+```
+
+---
+
+**Still stuck?** Most reported issues to date match one of the patterns in [§16](#16-troubleshooting--common-pitfalls). If none apply, capture `adb logcat -s Stratum StratumTrace` around the failure and include it when reporting the issue.
