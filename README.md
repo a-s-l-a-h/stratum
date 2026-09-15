@@ -332,7 +332,7 @@ python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emi
 ───────────────────────────────────────────
 ───────────────────────────────────────────
 ```
-python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7
+python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7 --format folder
 ```
 ───────────────────────────────────────────
 
@@ -344,7 +344,7 @@ python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emi
 ───────────────────────────────────────────
 ───────────────────────────────────────────
 ```
-python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7 --include-pyi no --include-reflect yes
+python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7 --include-pyi no --include-reflect yes --format folder
 ```
 
 ---
@@ -359,6 +359,7 @@ python 09_wheel/main.py ^
     --abi arm64-v8a ^
     --include-pyi no ^
     --include-reflect yes
+    --format folder
 ```
 ───────────────────────────────────────────
 

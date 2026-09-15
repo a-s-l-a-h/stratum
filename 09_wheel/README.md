@@ -67,4 +67,5 @@ python 09_wheel/main.py \
     --abi arm64-v8a \
     --chaquopy 3.12.0-0 \
     --include-pyi no
+    --format folder
 ```

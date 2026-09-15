@@ -26,6 +26,7 @@ import base64
 import hashlib
 import zipfile
 from pathlib import Path
+import shutil
 
 
 def sha256_record(name: str, data: bytes) -> str:
@@ -304,8 +305,13 @@ INIT_PY = '''# Stratum Runtime Entry Point. Auto-generated. DO NOT EDIT.
 try:
     from . import _dynamic as _stratum_dynamic
     _stratum_dynamic.install()
-except ImportError:
-    pass
+except ImportError as e:
+    # Only swallow if _dynamic.py actually does not exist (static wheel mode)
+    import sys
+    if "stratum._dynamic" in sys.modules:
+        import traceback
+        traceback.print_exc()
+        raise
 
 from . import _stratum as _core
 from stratum.core.stratum_object import StratumObject
@@ -542,6 +548,42 @@ ABI_TO_PEP738_ARCH = {
     "x86": "i686",
 }
 
+def build_folder_output(so_path: Path, py_dir: Path, out_dir: Path, include_reflect: bool, include_pyi: bool) -> Path:
+    """Writes the exact same content as the wheel, but as a plain,
+    unzipped 'stratum/' directory — ready to drop straight into
+    app/src/main/assets/python/stratum/. No dist-info, no pip metadata:
+    embedded Python never runs pip, so none of that is useful here."""
+    stratum_dir = out_dir / "stratum"
+    if stratum_dir.exists():
+        shutil.rmtree(stratum_dir)
+    stratum_dir.mkdir(parents=True, exist_ok=True)
+
+    (stratum_dir / "__init__.py").write_text(INIT_PY, encoding="utf-8")
+    (stratum_dir / "ui.py").write_text(STRATUM_UI_PY, encoding="utf-8")
+    if include_reflect:
+        (stratum_dir / "reflect.py").write_text(STRATUM_REFLECT_PY, encoding="utf-8")
+
+    so_dest = stratum_dir / "_stratum.so"
+    shutil.copy2(so_path, so_dest)
+    so_dest.chmod(0o755)  # executable bit — real filesystem, so this actually matters here
+
+    allowed = {".py"} if not include_pyi else {".py", ".pyi"}
+    for f in sorted(py_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        is_meta_blob = f.name == "_meta.json.gz"
+        if f.suffix not in allowed and not is_meta_blob:
+            continue
+        rel = f.relative_to(py_dir)
+        # Prevent double-nesting if py_dir already contains a top-level 'stratum/' folder
+        if rel.parts and rel.parts[0] == "stratum":
+            rel = rel.relative_to("stratum")
+        dest = stratum_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dest)
+
+    return stratum_dir
+
 def main():
     ap = argparse.ArgumentParser(description="Stratum Stage 09 - Build Wheel (Official Python Android)")
     ap.add_argument("--so", required=True, help="Path to compiled _stratum.so")
@@ -557,6 +599,9 @@ def main():
                     help="yes (default) packs stratum/reflect.py, the rare-path "
                         "call_java()/call_java_method() escape hatch. Zero AOT "
                         "overhead when unused; set 'no' to omit it entirely.")
+    ap.add_argument("--format", choices=["zip", "folder"], default="zip",
+                    help="zip (default) = standard .whl. folder = plain unzipped "
+                        "'stratum/' directory, ready to copy into assets/python/.")
     ap.add_argument("--include-pyi", choices=["yes", "no"], default="yes",
                      help="yes (default) packs .pyi stub files into the wheel. "
                           "'no' drops them for smaller production wheels.")
@@ -578,6 +623,16 @@ def main():
     py_dir = Path(args.py_src)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.format == "folder":
+        stratum_dir = build_folder_output(
+            so_path, py_dir, out_dir,
+            include_reflect=(args.include_reflect == "yes"),
+            include_pyi=(args.include_pyi == "yes"),
+        )
+        print(f"-> Folder output ready: {stratum_dir}")
+        print(f"   Copy it to: app/src/main/assets/python/stratum/")
+        return
 
     py_ver = ".".join(py_target_ver.split(".")[:2])
     py_tag = "cp" + py_ver.replace(".", "")
