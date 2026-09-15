@@ -37,9 +37,6 @@ import zipfile
 from pathlib import Path
 from urllib.request import urlretrieve
 
-MAVEN_BASE = "https://repo1.maven.org/maven2/com/chaquo/python/target"
-
-
 def print_header(title):
     print("==================================================")
     print(f" {title}")
@@ -90,64 +87,58 @@ def find_ninja(ndk_path: Path):
     return None
 
 
-def ensure_chaquopy_target(target_dir: Path, chaquopy_version: str, abi: str):
-    """Downloads (or reuses a cached copy of) the Chaquopy Python target
-    zip for one ABI. This gives us Python.h and libpython<ver>.so for
-    compile-time linking only — the actual interpreter .so that runs on
-    the device is supplied by the Chaquopy Gradle plugin, not by us."""
-    py_ver = ".".join(chaquopy_version.split(".")[:2])
-    abi_dest = target_dir / abi
-    python_h = abi_dest / "include" / f"python{py_ver}" / "Python.h"
-    libpython = abi_dest / "jniLibs" / abi / f"libpython{py_ver}.so"
+def resolve_official_python_target(cpython_dir: Path, py_version: str, abi: str):
+    """Resolves Python.h and libpython from the official python.org Android builds
+    extracted in Stage 00 under third_party/cpython_android/<version>/<abi>/prefix/."""
+    py_major_minor = ".".join(py_version.split(".")[:2])
+    prefix_dir = cpython_dir / abi / "prefix"
 
-    if python_h.exists() and libpython.exists():
-        return {
-            "include": python_h.parent.resolve().as_posix(),
-            "lib_dir": libpython.parent.resolve().as_posix(),
-            "py_ver": py_ver,
-        }
+    if not prefix_dir.exists():
+        raise FileNotFoundError(
+            f"Official Python target directory not found for ABI '{abi}' at: {prefix_dir}\n"
+            f"Ensure Stage 00 ran with --python-target-version {py_version}"
+        )
 
-    zip_name = f"target-{chaquopy_version}-{abi}.zip"
-    zip_path = target_dir / zip_name
-    url = f"{MAVEN_BASE}/{chaquopy_version}/{zip_name}"
+    # 1. Resolve include dir (e.g. prefix/include/python3.14)
+    include_dir = prefix_dir / "include" / f"python{py_major_minor}"
+    if not (include_dir / "Python.h").exists():
+        # Fallback glob in prefix/include/
+        candidates = list((prefix_dir / "include").glob("python*"))
+        found = False
+        for c in candidates:
+            if (c / "Python.h").exists():
+                include_dir = c
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(f"Python.h not found in {prefix_dir / 'include'}")
 
-    cached = Path(__file__).parent.parent / "third_party" / "chaquopy" / chaquopy_version / zip_name
-    if cached.exists():
-        shutil.copy2(cached, zip_path)
-    else:
-        urlretrieve(url, zip_path)
-
-    extract_tmp = target_dir / f"_raw_{abi}"
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_tmp)
-
-    src = extract_tmp
-    if not (extract_tmp / "include").exists():
-        subdirs = [f for f in extract_tmp.iterdir() if f.is_dir()]
-        if subdirs:
-            src = subdirs[0]
-
-    if abi_dest.exists():
-        shutil.rmtree(abi_dest)
-    shutil.copytree(src, abi_dest)
-    shutil.rmtree(extract_tmp, ignore_errors=True)
-    zip_path.unlink(missing_ok=True)
+    # 2. Resolve lib dir (prefix/lib) containing libpython<ver>.so
+    lib_dir = prefix_dir / "lib"
+    lib_file = lib_dir / f"libpython{py_major_minor}.so"
+    if not lib_file.exists():
+        candidates = list(lib_dir.glob("libpython*.so"))
+        if not candidates:
+            raise FileNotFoundError(f"No libpython*.so found in {lib_dir}")
 
     return {
-        "include": (abi_dest / "include" / f"python{py_ver}").resolve().as_posix(),
-        "lib_dir": (abi_dest / "jniLibs" / abi).resolve().as_posix(),
-        "py_ver": py_ver,
+        "include": include_dir.resolve().as_posix(),
+        "lib_dir": lib_dir.resolve().as_posix(),
+        "py_ver": py_major_minor,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stratum Stage 07 - Build stratum.so (v9)")
+    parser = argparse.ArgumentParser(description="Stratum Stage 07 - Build stratum.so (Official Python Android)")
     parser.add_argument("--cpp", required=True, help="06_cpp_emit/output/")
     parser.add_argument("--setup", required=True, help="00_setup/output/setup_report.json")
     parser.add_argument("--nanobind", required=True, help="nanobind source dir")
     parser.add_argument("--templates", default="07_build/templates")
     parser.add_argument("--abi", default="arm64-v8a", choices=["arm64-v8a", "armeabi-v7a", "x86_64", "x86"])
-    parser.add_argument("--chaquopy", default="3.12.0-0")
+    parser.add_argument("--python-target-version", "--py-version", default=None,
+                        help="Official Python version (defaults to version in setup_report.json, e.g. 3.14.7)")
+    parser.add_argument("--cpython-dir", default=None,
+                        help="Override path to cpython_android/<version> directory")
     parser.add_argument("--output", required=True)
     parser.add_argument("--log", dest="log_enabled", action="store_true", default=True,
                          help="Build WITH deep trace logging compiled in (default).")
@@ -155,12 +146,17 @@ def main():
                          help="Build WITHOUT logging — fully stripped, zero-cost, for production/release.")
     args = parser.parse_args()
 
-    print_header("STRATUM PIPELINE — STAGE 07 (BUILD) v9")
+    print_header("STRATUM PIPELINE — STAGE 07 (BUILD) [CPYTHON ANDROID]")
 
     setup = json.loads(Path(args.setup).read_text(encoding="utf-8"))
     cmake_exe = setup.get("cmake_path", "cmake")
     ndk_path = Path(setup["ndk_path"])
     android_api = setup.get("ndk_api", "24")
+
+    # Read official target metadata emitted by Stage 00
+    py_target_ver = args.python_target_version or setup.get("python_target_version", "3.14.7")
+    py_target_dir = Path(args.cpython_dir or setup.get("python_target_path",
+                         Path(__file__).parent.parent / "third_party" / "cpython_android" / py_target_ver))
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,19 +167,20 @@ def main():
         print("ERROR: ninja not found. Run: pip install ninja")
         sys.exit(1)
 
-    target_dir = output_dir / "python-target"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    chaquopy_paths = ensure_chaquopy_target(target_dir, args.chaquopy, args.abi)
+    python_paths = resolve_official_python_target(py_target_dir, py_target_ver, args.abi)
+    print(f"-> Target Python {python_paths['py_ver']} [{args.abi}]:")
+    print(f"   Include: {python_paths['include']}")
+    print(f"   Lib dir: {python_paths['lib_dir']}")
 
     tpl_dir = Path(args.templates)
     cpp_dir = Path(args.cpp)
 
     init_vars = {
-        "INC_ABS": chaquopy_paths["include"],
+        "INC_ABS": python_paths["include"],
         "HOST_PYTHON": Path(sys.executable).resolve().as_posix(),
-        "PY_VER": chaquopy_paths["py_ver"],
-        "PY_MAJOR": chaquopy_paths["py_ver"].split(".")[0],
-        "PY_MINOR": chaquopy_paths["py_ver"].split(".")[1],
+        "PY_VER": python_paths["py_ver"],
+        "PY_MAJOR": python_paths["py_ver"].split(".")[0],
+        "PY_MINOR": python_paths["py_ver"].split(".")[1],
     }
     init_file = build_dir / "StratumInit.cmake"
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -192,9 +189,9 @@ def main():
     cmake_vars = {
         "NANOBIND_DIR": Path(args.nanobind).resolve().as_posix(),
         "CORE_INCLUDE_DIR": (cpp_dir / "core").resolve().as_posix(),
-        "PYTHON_VERSION": chaquopy_paths["py_ver"],
-        "PYTHON_INCLUDE": chaquopy_paths["include"],
-        "PYTHON_LIB_DIR": chaquopy_paths["lib_dir"],
+        "PYTHON_VERSION": python_paths["py_ver"],
+        "PYTHON_INCLUDE": python_paths["include"],
+        "PYTHON_LIB_DIR": python_paths["lib_dir"],
     }
     cmake_file = output_dir / "CMakeLists.txt"
     cmake_file.write_text(render_template(tpl_dir / "CMakeLists.txt.tpl", cmake_vars), encoding="utf-8")

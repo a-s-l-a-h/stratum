@@ -47,13 +47,12 @@ NDK r25c supports up to API 33 compilation target headers. If the application co
 
 ### Debug / Development Build:
 ```bash
-python 07_build/main.py \
-    --cpp 06_cpp_emit/output \
-    --setup 00_setup/output/setup_report.json \
-    --nanobind third_party/nanobind \
-    --abi arm64-v8a \
-    --chaquopy 3.12.0-0 \
-    --output 07_build/output \
+python 07_build/main.py ^
+    --cpp 06_cpp_emit/output ^
+    --setup 00_setup/output/setup_report.json ^
+    --nanobind third_party/nanobind ^
+    --abi arm64-v8a ^
+    --output 07_build/output ^
     --log
 ```
 

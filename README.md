@@ -316,7 +316,7 @@ python 06_cpp_emit/main.py --input 05_resolve/output_patched --output 06_cpp_emi
 #### Pass --no-log for production builds
 ───────────────────────────────────────────
 ```
-python 07_build/main.py --cpp 06_cpp_emit/output --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --chaquopy 3.10.13-0 --output 07_build/output --log
+python 07_build/main.py --cpp 06_cpp_emit/output --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 07_build/output --log
 ```
 ───────────────────────────────────────────
 
