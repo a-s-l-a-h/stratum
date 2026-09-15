@@ -40,41 +40,57 @@ def check_jinja2():
     except ImportError:
         return False, "Not installed. Run: pip install jinja2"
 
-def setup_chaquopy(version):
-    """Download available Chaquopy target ZIPs to third_party to cache them. Ignores missing ABIs."""
+def setup_official_python(version):
+    """Download official Python Android release tarballs (python.org/ftp/python) to third_party/cpython_android/."""
+    import tarfile
+
     project_root = Path(__file__).parent.parent
-    chaquo_dir = project_root / "third_party" / "chaquopy" / version
-    chaquo_dir.mkdir(parents=True, exist_ok=True)
-    
-    abis = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86"]
-    base_url = "https://repo1.maven.org/maven2/com/chaquo/python/target"
-    
+    target_dir = project_root / "third_party" / "cpython_android" / version
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Official python.org Android builds target aarch64 (arm64-v8a) and x86_64 (x86_64)
+    triplet_map = {
+        "arm64-v8a": "aarch64-linux-android",
+        "x86_64": "x86_64-linux-android"
+    }
+
+    base_url = f"https://www.python.org/ftp/python/{version}"
     msgs = []
     success_count = 0
-    
-    for abi in abis:
-        zip_name = f"target-{version}-{abi}.zip"
-        zip_path = chaquo_dir / zip_name
-        
-        if zip_path.exists():
+
+    for abi, triplet in triplet_map.items():
+        tar_name = f"python-{version}-{triplet}.tar.gz"
+        tar_path = target_dir / tar_name
+        extracted_dir = target_dir / abi
+
+        if extracted_dir.exists() and any(extracted_dir.iterdir()):
             msgs.append(f"{abi} (cached)")
             success_count += 1
             continue
-            
+
         try:
-            urlretrieve(f"{base_url}/{version}/{zip_name}", zip_path)
-            msgs.append(f"{abi} (dl)")
+            if not tar_path.exists():
+                print(f"   Downloading {tar_name} from python.org...")
+                urlretrieve(f"{base_url}/{tar_name}", tar_path)
+
+            print(f"   Unpacking {tar_name} to {abi}/...")
+            extracted_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(path=extracted_dir)
+
+            msgs.append(f"{abi} (dl+extracted)")
             success_count += 1
         except Exception as e:
-            # 404 means the architecture isn't provided for this Python version. Skip it.
-            msgs.append(f"{abi} (skipped/404)")
-            if zip_path.exists():
-                zip_path.unlink() # cleanup empty/failed file
-                
+            msgs.append(f"{abi} (failed/404: {e})")
+            if tar_path.exists():
+                tar_path.unlink()
+            if extracted_dir.exists():
+                shutil.rmtree(extracted_dir, ignore_errors=True)
+
     if success_count > 0:
-        return True, f"Found {success_count}/4 ABIs: {', '.join(msgs)}"
+        return True, str(target_dir.resolve()), f"Found {success_count}/2 official ABIs: {', '.join(msgs)}"
     else:
-        return False, f"Failed to find ANY architecture for {version}. Is the version number correct?"
+        return False, None, f"Failed to download ANY official Python architecture for {version} from python.org."
 
 def setup_nanobind(version):
     """Check for Nanobind in third_party/. If missing, clone specific version WITH SUBMODULES."""
@@ -240,7 +256,8 @@ def main():
     parser.add_argument("--api-version", type=str, default="35", help="Target Android API version (Default: 35)")
     parser.add_argument("--ndk-api", type=str, default="24", help="NDK compile target API = your app minSdkVersion (Default: 24)")
     parser.add_argument("--nanobind-version", type=str, default="v2.12.0", help="Nanobind release version to clone (Default: v2.12.0)")
-    parser.add_argument("--chaquopy-version", type=str, default="3.12.0-0", help="Chaquopy version to cache (Default: 3.12.0-0)")
+    parser.add_argument("--python-target-version", "--py-version", type=str, default="3.14.7",
+                        help="Official Python version on Android to cache from python.org (Default: 3.14.7)")
     
     parser.add_argument("--output", type=str, required=True, help="Output directory for setup_report.json")
     args = parser.parse_args()
@@ -264,9 +281,9 @@ def main():
     print(f"[{'OK' if nano_ok else 'FAIL'}] Nanobind       : {nano_msg}")
     if not nano_ok: errors.append(nano_msg)
 
-    chaquo_ok, chaquo_msg = setup_chaquopy(version=args.chaquopy_version)
-    print(f"[{'OK' if chaquo_ok else 'FAIL'}] Chaquopy       : {chaquo_msg}")
-    if not chaquo_ok: errors.append(chaquo_msg)
+    py_target_ok, py_target_path, py_target_msg = setup_official_python(version=args.python_target_version)
+    print(f"[{'OK' if py_target_ok else 'FAIL'}] Python Android : {py_target_msg}")
+    if not py_target_ok: errors.append(py_target_msg)
 
     # 2. Java Tools
     javap_ok, javap_path, javap_msg = check_javap(args.jdk_path)
@@ -287,7 +304,7 @@ def main():
     if not ndk_ok: errors.append(ndk_msg)
 
     # Compile Final Report
-    all_ok = all([py_ok, jinja_ok, nano_ok, chaquo_ok, javap_ok, cmake_ok, jar_ok, ndk_ok])
+    all_ok = all([py_ok, jinja_ok, nano_ok, py_target_ok, javap_ok, cmake_ok, jar_ok, ndk_ok])
 
     report = {
         "all_ok": all_ok,
@@ -302,6 +319,8 @@ def main():
         "jinja2_ok": jinja_ok,
         "nanobind_present": nano_ok,
         "nanobind_path": nano_path,
+        "python_target_version": args.python_target_version,
+        "python_target_path": py_target_path,
         "android_api": args.api_version,
         "ndk_api": args.ndk_api,
         "timestamp": datetime.now().isoformat()

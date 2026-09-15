@@ -31,7 +31,7 @@ Every downstream stage in the Stratum pipeline reads `setup_report.json` as its 
 1. **Python Environment Inspection**: Verifies Python 3.10+ and checks for required host packages (`jinja2`).
 2. **Automated Third-Party Dependency Bootstrap**:
    - **Nanobind**: Inspects `third_party/nanobind/`. If missing or incomplete (e.g., missing the `tsl/robin_map` submodule), it clones the release recursively using shallow submodules.
-   - **Chaquopy Target Caching**: Downloads and caches target ABI packages (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`) containing `Python.h` and target libraries directly from Maven Central into `third_party/chaquopy/<version>/`.
+   - **Official Python Android Target Caching**: Downloads and extracts official CPython Android binaries (`aarch64-linux-android` for `arm64-v8a` and `x86_64-linux-android` for `x86_64`) from `https://www.python.org/ftp/python/` directly into `third_party/cpython_android/<version>/`.
 3. **Java Toolchain Verification**: Resolves and tests `javap`, ensuring the host JDK is version 17 or newer.
 4. **Android Build System Verification**:
    - Locates and validates CMake (version 3.15+ required).
@@ -53,7 +53,7 @@ Every downstream stage in the Stratum pipeline reads `setup_report.json` as its 
 | **Android NDK** | `r25c+` (LLVM 14+) | Compiling `_stratum.so` in Stage 07 | No (Must download NDK) |
 | **android.jar** | API level 24–35 | Stub class definitions for reflection | No (Must supply jar/SDK) |
 | **Nanobind** | `v2.12.0` (default) | C++17 Python binding runtime | **Yes** (Cloned automatically) |
-| **Chaquopy Targets**| `3.12.0-0` (default) | Target Python headers & `.so` stubs | **Yes** (Downloaded from Maven) |
+| **Official Python Android**| `3.14.7` (default) | Official target Python headers & static/shared libs | **Yes** (Downloaded from python.org) |
 
 ---
 
@@ -86,7 +86,7 @@ python 00_setup/main.py [OPTIONS] --ndk-path <PATH> --output <PATH>
 | `--api-version` | `INT/STR` | `35` | The Android SDK API level to inspect (matches `android.jar`). |
 | `--ndk-api` | `INT/STR` | `24` | The compilation target API level (`minSdkVersion`). Sets the minimum Android OS level that can load your native engine. |
 | `--nanobind-version` | `STRING` | `v2.12.0` | Release tag of Nanobind to clone into `third_party/nanobind/`. |
-| `--chaquopy-version` | `STRING` | `3.12.0-0` | Chaquopy target ZIP release to download. Format: `<py-ver>-<build>` (e.g., `3.12.0-0`, `3.10.13-0`). |
+| `--python-target-version` | `STRING` | `3.14.7` | Official Python version to download from python.org (e.g. `3.14.7`). |
 
 ---
 
@@ -123,7 +123,7 @@ python 00_setup/main.py ^
     --jar-path "third_party/android-35.jar" ^
     --api-version 35 ^
     --ndk-api 24 ^
-    --chaquopy-version "3.12.0-0" ^
+    --python-target-version "3.14.7" ^
     --output "00_setup/output/"
 
 # Linux / macOS
@@ -132,7 +132,7 @@ python 00_setup/main.py \
     --jar-path "third_party/android-35.jar" \
     --api-version 35 \
     --ndk-api 24 \
-    --chaquopy-version "3.12.0-0" \
+    --python-target-version "3.14.7" \
     --output "00_setup/output/"
 ```
 
