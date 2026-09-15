@@ -1,3 +1,11 @@
+> [!NOTE]
+> **📢 Python Runtime Update**
+> 
+> Stratum is transitioning to use the Python builds provided directly from [python.org](https://www.python.org/downloads/android/).
+> 
+> 👉 **Using or prefer Chaquopy?**  
+> Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+
 
 <div align="center">
 
