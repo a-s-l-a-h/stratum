@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stratum Pipeline — Stage 09: Build Python Wheel (.whl)
-=========================================================
+Stratum Pipeline — Stage 09: Build Python Wheel (.whl) 
+==================================================================================
 LOCATION: 09_wheel/main.py
-VERSION: v9 (unchanged from v8 — no bugs identified in this stage)
+VERSION: v10 (Official CPython Android / PEP 738 standard tags)
 
 WHAT THIS STAGE DOES
     Zips _stratum.so (from Stage 07) together with every generated
     Python .py/.pyi file (from Stage 08) into a standard installable
-    wheel. Also injects stratum/__init__.py, which provides:
-      - getActivity() / get_activity()
-      - setContentView() / set_content_view()
-      - set_log_enabled(bool) — runtime toggle for the compile-time
-        logging level baked in at Stage 07.
-      - _auto_register_lifecycle() — scans your app's main.py for
-        onCreate/onResume/onPause/onStop/onDestroy and wires them to the
-        native Activity lifecycle automatically on import.
+    wheel targeting official embedded Python on Android. Also injects
+    stratum/__init__.py, stratum/ui.py, and optionally stratum/reflect.py.
 
-WHEEL NAMING
-    stratum-<version>-<pytag>-<pytag>-android_<minapi>_<abi>.whl
-    Match --abi and --chaquopy here to EXACTLY what you used in
-    07_build/main.py, or Chaquopy on the Android side won't pick the
-    wheel up for the correct device architecture / Python version.
+WHEEL NAMING & TAGS (PEP 738)
+    stratum-<version>-<pytag>-<pytag>-android_<minapi>_<arch>.whl
+    Matches official CPython Android architecture triplets:
+      arm64-v8a   -> aarch64
+      x86_64      -> x86_64
+      armeabi-v7a -> armv7l
+      x86         -> i686
 """
 
 import argparse
@@ -536,42 +532,59 @@ except Exception:
 '''
 
 
+import json
+
+# Official CPython Android PEP 738 wheel platform architecture mapping
+ABI_TO_PEP738_ARCH = {
+    "arm64-v8a": "aarch64",
+    "x86_64": "x86_64",
+    "armeabi-v7a": "armv7l",
+    "x86": "i686",
+}
+
 def main():
-    ap = argparse.ArgumentParser(description="Stratum Stage 09 - Build Wheel (v9)")
+    ap = argparse.ArgumentParser(description="Stratum Stage 09 - Build Wheel (Official Python Android)")
     ap.add_argument("--so", required=True, help="Path to compiled _stratum.so")
     ap.add_argument("--py-src", required=True, help="Path to 08_pyi_emit/output/")
     ap.add_argument("--output", required=True, help="Output destination folder")
-    ap.add_argument("--version", default="0.9.0")
-    ap.add_argument("--min-api", default="24")
-    ap.add_argument("--abi", default="arm64-v8a")
-    ap.add_argument("--chaquopy", default="3.12.0-0")
+    ap.add_argument("--setup", default=None, help="Optional path to 00_setup/output/setup_report.json")
+    ap.add_argument("--version", default="0.9.0", help="Wheel package version")
+    ap.add_argument("--min-api", default=None, help="Minimum Android API level (defaults to setup_report ndk_api or 24)")
+    ap.add_argument("--abi", default="arm64-v8a", choices=["arm64-v8a", "armeabi-v7a", "x86_64", "x86"])
+    ap.add_argument("--python-target-version", "--py-version", default=None,
+                    help="Official Python version (e.g. 3.14.7; defaults to setup_report.json value)")
     ap.add_argument("--include-reflect", choices=["yes", "no"], default="yes",
                     help="yes (default) packs stratum/reflect.py, the rare-path "
                         "call_java()/call_java_method() escape hatch. Zero AOT "
                         "overhead when unused; set 'no' to omit it entirely.")
     ap.add_argument("--include-pyi", choices=["yes", "no"], default="yes",
-                     help="yes (default, unchanged v9 behavior) packs .pyi stub "
-                          "files into the wheel too. no drops them from the "
-                          "runtime wheel (they're IDE-only, never imported at "
-                          "runtime) to shrink the .whl — use for production/"
-                          "release builds. Works with either Stage 08 --mode.")
+                     help="yes (default) packs .pyi stub files into the wheel. "
+                          "'no' drops them for smaller production wheels.")
     args = ap.parse_args()
 
     print("=" * 70)
-    print("  STRATUM PIPELINE — STAGE 09 (WHEEL) v9")
+    print("  STRATUM PIPELINE — STAGE 09 (WHEEL) [OFFICIAL PYTHON ANDROID]")
     print("=" * 70)
+
+    # Auto-read defaults from Stage 00 setup_report.json if available
+    setup_data = {}
+    if args.setup and Path(args.setup).exists():
+        setup_data = json.loads(Path(args.setup).read_text(encoding="utf-8"))
+
+    py_target_ver = args.python_target_version or setup_data.get("python_target_version", "3.14.7")
+    min_api = args.min_api or setup_data.get("ndk_api", "24")
 
     so_path = Path(args.so)
     py_dir = Path(args.py_src)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    py_ver = ".".join(args.chaquopy.split(".")[:2])
+    py_ver = ".".join(py_target_ver.split(".")[:2])
     py_tag = "cp" + py_ver.replace(".", "")
-    abi_tag = args.abi.replace("-", "_")
+    arch_tag = ABI_TO_PEP738_ARCH.get(args.abi, args.abi.replace("-", "_"))
     ver_safe = args.version.replace("-", "_")
 
-    wheel_name = f"stratum-{ver_safe}-{py_tag}-{py_tag}-android_{args.min_api}_{abi_tag}.whl"
+    wheel_name = f"stratum-{ver_safe}-{py_tag}-{py_tag}-android_{min_api}_{arch_tag}.whl"
     wheel_path = out_dir / wheel_name
     dist_info = f"stratum-{ver_safe}.dist-info"
     records = []
@@ -617,7 +630,7 @@ def main():
 
         wheel_meta = (
             f"Wheel-Version: 1.0\nGenerator: stratum\nRoot-Is-Purelib: false\n"
-            f"Tag: {py_tag}-{py_tag}-android_{args.min_api}_{abi_tag}\n"
+            f"Tag: {py_tag}-{py_tag}-android_{min_api}_{arch_tag}\n"
         ).encode()
         zf.writestr(f"{dist_info}/WHEEL", wheel_meta)
         records.append(sha256_record(f"{dist_info}/WHEEL", wheel_meta))

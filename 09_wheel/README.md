@@ -48,7 +48,8 @@ so_info.external_attr = 0o755 << 16  # rwxr-xr-x
 | `--version` | No | `0.9.0` | Package semantic version. |
 | `--min-api` | No | `24` | Target Android minimum SDK level. |
 | `--abi` | No | `arm64-v8a` | Target ABI architecture. |
-| `--chaquopy` | No | `3.12.0-0` | Chaquopy version string. |
+| `--setup` | No | `None` | Path to `setup_report.json` to inherit Python version and NDK API automatically. |
+| `--py-version` | No | `3.14.7` | Target CPython Android version. |
 | `--include-reflect` | No | `yes` | Include `stratum/reflect.py` escape hatch (`yes` or `no`). |
 | `--include-pyi` | No | `yes` | Include `.pyi` IDE stub files in the wheel (`yes` or `no`). |
 
