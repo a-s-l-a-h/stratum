@@ -11,10 +11,12 @@
 
 # 🌉 Stratum
 
-**An Ahead-of-Time (AOT) bridge that turns the entire Android SDK into a native, zero-reflection Python API.**
+**An Ahead-of-Time (AOT) compiled metadata bridge that turns the entire Android SDK into a typed, zero-reflection Python API.**
 
 Write real Android apps — UI, sensors, camera, canvas, background services — in plain Python.
-No JNI boilerplate. No per-class C++ codegen. No reflection at runtime.
+
+* **AOT Compiled Metadata:** Extracts and precomputes all Android SDK class, method, and field signatures into compact, deduplicated C++ tables at build time—eliminating compiler OOMs and runtime SDK discovery.
+* **Zero Runtime Java Reflection:** Bypasses `java.lang.reflect.Method.invoke()`. Dispatches calls directly through cached JNI method slots (`Call<Type>MethodA`) using pre-packed native argument arrays.
 
 [🚀 Full Demo App](https://github.com/a-s-l-a-h/Stratum-OpenCV-Demo) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
 
