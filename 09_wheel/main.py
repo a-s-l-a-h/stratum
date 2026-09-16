@@ -571,7 +571,7 @@ def build_folder_output(so_path: Path, py_dir: Path, out_dir: Path, include_refl
     for f in sorted(py_dir.rglob("*")):
         if not f.is_file():
             continue
-        is_meta_blob = f.name == "_meta.json.gz"
+        is_meta_blob = f.name == "_meta.json"
         if f.suffix not in allowed and not is_meta_blob:
             continue
         rel = f.relative_to(py_dir)
@@ -672,9 +672,9 @@ def main():
             if not f.is_file():
                 continue
             # .py / .pyi as before (.pyi optionally dropped via --include-pyi no).
-            # _meta.json.gz is the new dynamic-mode metadata blob (08_pyi_emit
+            # _meta.json is the dynamic-mode metadata blob (08_pyi_emit
             # --mode dynamic) — it has neither suffix, so it needs its own check.
-            is_meta_blob = f.name == "_meta.json.gz"
+            is_meta_blob = f.name == "_meta.json"
             if f.suffix not in allowed_suffixes and not is_meta_blob:
                 continue
             rel = f.relative_to(py_dir)
