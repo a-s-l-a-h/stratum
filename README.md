@@ -366,7 +366,7 @@ python 09_wheel/main.py ^
 ---
 # stratum embed fully to single .so file it's depending py files all inside to single .so 
 
-### this need same as 00 to 05_5 or after 09
+### this need same as 00 to 05_5 or after 09  ,, and below 10 one 8 and 10 emit choose static maybe see some perfomance improvment , and also choose --no-log in build when production time
 
 ```
 python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode dynamic                                                                   
