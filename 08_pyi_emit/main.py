@@ -164,6 +164,8 @@ _OVERLOAD_TYPE_CHECK = {
     # v10 FIX: Python bool is a subclass of int (isinstance(True, int) is
     # True). Without excluding bool here, obj.setVisible(True) would match
     # the int-typed overload before ever reaching the boolean-typed one.
+    "Z": "isinstance(args[0], bool)",
+    "C": "(isinstance(args[0], str) and len(args[0]) == 1)",
     "I": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
     "J": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
     "S": "(isinstance(args[0], int) and not isinstance(args[0], bool))",
@@ -171,7 +173,6 @@ _OVERLOAD_TYPE_CHECK = {
     "s": "isinstance(args[0], str)",
     "F": "(isinstance(args[0], (float, int)) and not isinstance(args[0], bool))",
     "D": "(isinstance(args[0], (float, int)) and not isinstance(args[0], bool))",
-    "Z": "isinstance(args[0], bool)",
     "[": "isinstance(args[0], (bytes, bytearray))",
     "]": "isinstance(args[0], list)",
     "q": "isinstance(args[0], list)",
@@ -185,6 +186,28 @@ _OVERLOAD_TYPE_CHECK = {
     "M": "(isinstance(args[0], (list, tuple, set)) or hasattr(args[0], '_ptr'))",
     "N": "(isinstance(args[0], dict) or hasattr(args[0], '_ptr'))",
 }
+
+_TAG_SPECIFICITY = {
+    "Z": 0, "C": 1, "I": 2, "J": 2, "S": 2, "B": 2,
+    "F": 3, "D": 3, "s": 4, "[": 5, "]": 6, "q": 6,
+    "f": 6, "d": 6, "b": 6, "c": 6, "h": 6, "T": 6,
+    "A": 6, "M": 7, "N": 7,
+}
+
+def _sort_by_specificity(overloads, diff_idx):
+    def _rank(ov):
+        tags = ov.get("param_tags", "")
+        tag = tags[diff_idx] if diff_idx < len(tags) else "L"
+        params = ov.get("params", [])
+        param = params[diff_idx] if diff_idx < len(params) else {}
+        if tag in _TAG_SPECIFICITY:
+            return _TAG_SPECIFICITY[tag]
+        if tag == "L" and param.get("is_boxed", False):
+            return 8
+        if tag in ("L", "a", "p") and param.get("_target_class_id") is not None:
+            return 9
+        return 99  # Unconstrained generic Object fallback
+    return sorted(overloads, key=_rank)
 
 
 # v10.2 FIX: boxed wrapper types (java.lang.Boolean/Integer/Long/Short/
@@ -288,17 +311,18 @@ def build_method_dispatcher(group: list, class_id: int) -> list:
             if len(overloads) == 1:
                 lines.append(emit_call(overloads[0], indent="            "))
             else:
-                for ov in overloads:
-                    diff_idx = 0
-                    for idx in range(min(len(ov.get("params", [])), argc)):
-                        types_at_idx = {
-                            (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
-                            for other in overloads
-                            if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
-                        }
-                        if len(types_at_idx) > 1:
-                            diff_idx = idx
-                            break
+                diff_idx = 0
+                for idx in range(argc):
+                    types_at_idx = {
+                        (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
+                        for other in overloads
+                        if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
+                    }
+                    if len(types_at_idx) > 1:
+                        diff_idx = idx
+                        break
+                sorted_overloads = _sort_by_specificity(overloads, diff_idx)
+                for ov in sorted_overloads:
                     tag = ov["param_tags"][diff_idx] if diff_idx < len(ov.get("param_tags", "")) else "L"
                     param = ov["params"][diff_idx] if diff_idx < len(ov.get("params", [])) else {}
                     cond = _overload_condition(tag, param).replace("args[0]", f"args[{diff_idx}]")
@@ -418,17 +442,18 @@ def emit_python_class(data: dict) -> str:
                 # Disambiguate on the first argument index where these
                 # constructors' param tags actually differ, not always
                 # index 0 (same fix as build_method_dispatcher()).
-                for c in c_list:
-                    diff_idx = 0
-                    for idx in range(min(len(c.get("params", [])), argc)):
-                        types_at_idx = {
-                            (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
-                            for other in c_list
-                            if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
-                        }
-                        if len(types_at_idx) > 1:
-                            diff_idx = idx
-                            break
+                diff_idx = 0
+                for idx in range(argc):
+                    types_at_idx = {
+                        (other["param_tags"][idx], other["params"][idx].get("java_type", ""))
+                        for other in c_list
+                        if idx < len(other.get("param_tags", "")) and idx < len(other.get("params", []))
+                    }
+                    if len(types_at_idx) > 1:
+                        diff_idx = idx
+                        break
+                sorted_ctors = _sort_by_specificity(c_list, diff_idx)
+                for c in sorted_ctors:
                     tag = c["param_tags"][diff_idx] if diff_idx < len(c.get("param_tags", "")) else "L"
                     param = c["params"][diff_idx] if diff_idx < len(c.get("params", [])) else {}
                     cond = _overload_condition(tag, param).replace("args[0]", f"args[{diff_idx}]")
@@ -869,11 +894,20 @@ _BOXED_MATCHERS = {
     "java/lang/Character": lambda a: isinstance(a, str),
 }
 
+_TAG_SPECIFICITY = {
+    "Z": 0, "C": 1, "I": 2, "J": 2, "S": 2, "B": 2,
+    "F": 3, "D": 3, "s": 4, "[": 5, "]": 6, "q": 6,
+    "f": 6, "d": 6, "b": 6, "c": 6, "h": 6, "T": 6,
+    "A": 6, "M": 7, "N": 7,
+}
+
 
 def _matches(tag, target_cid, is_boxed, jni_class, arg):
     # v10 FIX: check bool BEFORE int (bool subclasses int in Python).
     if tag == "Z":
         return isinstance(arg, bool)
+    if tag == "C":
+        return isinstance(arg, str) and len(arg) == 1
     if tag in ("I", "J", "S", "B"):
         return isinstance(arg, int) and not isinstance(arg, bool)
     if tag == "s":
@@ -921,21 +955,28 @@ def _pick_overload(overloads, args, name="method"):
         if len(types_at_idx) > 1:
             diff_idx = idx
             break
-    for ov in candidates:
+
+    def _rank(ov):
+        tag = ov[1][diff_idx] if diff_idx < len(ov[1]) else "L"
+        if tag in _TAG_SPECIFICITY:
+            return _TAG_SPECIFICITY[tag]
+        boxed = ov[6][diff_idx] if len(ov) > 6 and diff_idx < len(ov[6]) else False
+        if tag == "L" and boxed:
+            return 8
+        cid = ov[3][diff_idx] if diff_idx < len(ov[3]) else None
+        if tag in ("L", "a", "p") and cid is not None:
+            return 9
+        return 99
+
+    sorted_candidates = sorted(candidates, key=_rank)
+    for ov in sorted_candidates:
         tag = ov[1][diff_idx] if diff_idx < len(ov[1]) else "L"
         cid = ov[3][diff_idx] if diff_idx < len(ov[3]) else None
-        # v10.3 FIX: ov[6]/ov[7] are the new is_boxed/jni_class lists.
-        # Guarded with len(ov) > 6 so old cached _meta.json.gz blobs
-        # (built before this fix, still holding 6-element tuples) don't
-        # IndexError -- they just get is_boxed=False, jni_class="" and
-        # fall through to the pre-fix behavior for that one call, not a
-        # crash. Rerun Stage 08 with --mode dynamic to regenerate the
-        # blob with 8-element tuples everywhere.
         boxed = ov[6][diff_idx] if len(ov) > 6 and diff_idx < len(ov[6]) else False
         jcls = ov[7][diff_idx] if len(ov) > 7 and diff_idx < len(ov[7]) else ""
         if _matches(tag, cid, boxed, jcls, args[diff_idx]):
             return ov
-    return candidates[0]
+    return sorted_candidates[0]
 
 
 def _dispatch_call(target_ptr, class_id, slot, ret_type_id, return_fqn, args):
