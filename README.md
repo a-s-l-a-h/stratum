@@ -307,77 +307,26 @@ python 05_resolve/main.py --input 05_5_abstract/output/patched --output 05_resol
 ```
 ───────────────────────────────────────────
 
-### Stage 06: Universal C++ Engine Emit
-───────────────────────────────────────────
-```
-python 06_cpp_emit/main.py --input 05_resolve/output_patched --output 06_cpp_emit/output
-```
+
+
 ───────────────────────────────────────────
 
-### Stage 07: Compile _stratum.so 
-#### Pass --no-log for production builds
-───────────────────────────────────────────
-```
-python 07_build/main.py --cpp 06_cpp_emit/output --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 07_build/output --log
-```
-───────────────────────────────────────────
-
-### Stage 08 + 09: Python Classes/.pyi Emit + Wheel Assembly 
-
-#### -- Dev build (unchanged, default): full per-class .py/.pyi, debuggable 
-───────────────────────────────────────────
-```
-python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output
-```
-───────────────────────────────────────────
-───────────────────────────────────────────
-```
-python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7 --format folder
-```
-───────────────────────────────────────────
-
-### Production build: one _meta.json.gz blob + loader, no .pyi -> smaller .whl 
-───────────────────────────────────────────
-```
-python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode dynamic
-```
-───────────────────────────────────────────
-───────────────────────────────────────────
-```
-python 09_wheel/main.py --so 07_build/output/_stratum.so --py-src 08_pyi_emit/output --output 09_wheel/output --version 0.9.0 --min-api 24 --abi arm64-v8a --py-version 3.14.7 --include-pyi no --include-reflect yes --format folder
-```
-
----
-or 
-```
-python 09_wheel/main.py ^
-    --so 07_build/output/_stratum.so ^
-    --py-src 08_pyi_emit/output ^
-    --output 09_wheel/output ^
-    --setup 00_setup/output/setup_report.json ^
-    --version 0.9.0 ^
-    --abi arm64-v8a ^
-    --include-pyi no ^
-    --include-reflect yes
-    --format folder
-```
-───────────────────────────────────────────
 
 ---
 # stratum embed fully to single .so file it's depending py files all inside to single .so 
 
-### this need same as 00 to 05_5 or after 09  ,, and below 10 one 8 and 10 emit choose static maybe see some perfomance improvment , and also choose --no-log in build when production time
+### this need same as 00 to 05_5 then 08  ,, and below 10 (10 emit , 10 build) choose static maybe see some perfomance improvment , and also choose --no-log in build when production time
 
 ```
-python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode dynamic                                                                   
-```
+python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode static 
 
 ```
-python 10_embed/emit.py --input 05_resolve/output_patched --static-py 08_pyi_emit/output --setup 00_setup/output/setup_report.json --output 10_embed/output --mode dynamic
+```
+python 10_embed/emit.py --input 05_resolve/output_patched --static-py 08_pyi_emit/output --setup 00_setup/output/setup_report.json --output 10_embed/output --mode static 
 ```
 ```
-python 10_embed/build.py --core 10_embed/output/core --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 10_embed/output   
-```
+python 10_embed/build.py --core 10_embed/output/core --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 10_embed/output --no-log
+``` 
 --------------------------------------------------------------------
 ---
 
