@@ -53,6 +53,7 @@ target_link_libraries(stratum PRIVATE
 target_link_options(stratum PRIVATE
     -Wl,--gc-sections
     -Wl,--as-needed
+    -Wl,-z,max-page-size=16384
 )
 
 set_target_properties(stratum PROPERTIES

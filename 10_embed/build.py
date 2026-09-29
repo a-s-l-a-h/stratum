@@ -232,6 +232,7 @@ def main():
         "-DCMAKE_MAKE_PROGRAM=%s" % ninja_exe,
         "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=%s" % init_file.resolve().as_posix(),
         "-DSTRATUM_LOG_ENABLED=%d" % (1 if args.log_enabled else 0),
+        "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
     ], check=True)
     subprocess.run([cmake_exe, "--build", str(build_dir), "--config", "Release",
                     "--parallel"], check=True)
@@ -250,6 +251,7 @@ def main():
         "abi": args.abi,
         "ndk_api": android_api,
         "android_api_jar": setup.get("android_api"),
+        "page_size_alignment": "16KB",
         "logging": bool(args.log_enabled),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "note": "Rename to libstratum.so when placing under jniLibs/<abi>/ in a consuming project.",
