@@ -1,24 +1,30 @@
 > [!NOTE]
-> **📢 Python Runtime Update**
+> **📢 Python Runtime Update: Embedded Python from python.org**
 > 
-> Stratum is transitioning to use the Python builds provided directly from [python.org](https://www.python.org/downloads/android/).
+> Stratum now supports embedded Python Android builds provided directly from [python.org](https://www.python.org/downloads/android/).
+>
+> 🚀 **Ready-to-use Android Project Template:**  
+> Check out the complete Android Studio integration with embedded Python 3.14:  
+> **[`stratum_android_py_3_14`](https://github.com/a-s-l-a-h/stratum_android_py_3_14)**
 > 
 > 👉 **Using or prefer Chaquopy?**  
-> Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+> The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+
+---
 
 
 <div align="center">
 
 # 🌉 Stratum
 
-**An Ahead-of-Time (AOT) compiled metadata bridge that turns the entire Android SDK into a typed, zero-reflection Python API.**
+
 
 Write real Android apps — UI, sensors, camera, canvas, background services — in plain Python.
 
-* **AOT Compiled Metadata:** Extracts and precomputes all Android SDK class, method, and field signatures into compact, deduplicated C++ tables at build time—eliminating compiler OOMs and runtime SDK discovery.
-* **Zero Runtime Java Reflection:** Bypasses `java.lang.reflect.Method.invoke()`. Dispatches calls directly through cached JNI method slots (`Call<Type>MethodA`) using pre-packed native argument arrays.
+* **Compiled Metadata:** Extracts and precomputes all Android SDK class, method, and field signatures into compact, deduplicated C++ tables at build time.
 
-[🚀 Full Demo App](https://github.com/a-s-l-a-h/Stratum-OpenCV-Demo) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
+
+[🚀 Stratum Template (Python 3.14 ) ](https://github.com/a-s-l-a-h/stratum_android_py_3_14) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
 
 </div>
 
