@@ -71,7 +71,7 @@ python 05_5_abstract/main.py --input 05_resolve/output --output 05_5_abstract/ou
 #### -> Copy 05_5_abstract/output/java/com/stratum/adapters/*.java into Android Studio: runtime module . look the demo project . 
 
 --- 
-refer this to where to find where to place the adapter java files 
+refer this to find where to place the adapter java files 
 
 https://github.com/a-s-l-a-h/stratum_android_py_3_14
 
