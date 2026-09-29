@@ -15,6 +15,11 @@ public class StratumReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         StratumBootstrap.ensureReady(context);
+        // GUARD AGAINST CRASH IF PYTHON IS NOT RUNNING YET
+        if (!StratumBootstrap.isReady()) {
+            android.util.Log.w("StratumReceiver", "Ignored broadcast: Python runtime is not ready.");
+            return;
+        }
         StratumInvocationHandler.nativeDispatch(KEY, "onReceive", new Object[]{ context, intent });
     }
 }

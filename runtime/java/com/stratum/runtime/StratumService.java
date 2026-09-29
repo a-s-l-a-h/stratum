@@ -18,6 +18,11 @@ public class StratumService extends Service {
     public void onCreate() {
         super.onCreate();
         StratumBootstrap.ensureReady(this);
+        if (!StratumBootstrap.isReady()) {
+            android.util.Log.w("StratumService", "Aborting service: Python runtime is not ready.");
+            stopSelf();
+            return;
+        }
         StratumInvocationHandler.nativeDispatch(KEY, "onCreate", new Object[]{ this });
     }
 
