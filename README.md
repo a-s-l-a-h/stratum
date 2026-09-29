@@ -29,10 +29,7 @@ Write real Android apps — UI, sensors, camera, canvas, background services —
 </div>
 
 
----
 
-> ⚡ **Looking for a fast, working example?**  
-> Check out the **[Stratum OpenCV Demo](https://github.com/a-s-l-a-h/Stratum-OpenCV-Demo)** to see a complete, real-world Android app (camera, UI, and native performance) built entirely with Stratum.
 
 ---
 
