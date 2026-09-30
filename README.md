@@ -42,7 +42,10 @@ Stratum is a two-part system:
 
 ```python
 import stratum
-from stratum.android.widget import Button, LinearLayout, TextView
+from stratum.android.widget.Button import Button
+from stratum.android.widget.LinearLayout import LinearLayout
+from stratum.android.widget.TextView import TextView
+
 
 def onCreate():
     activity = stratum.get_activity()
