@@ -20,6 +20,7 @@ Write real Android apps — UI, sensors, camera, canvas, background services —
 </div>
 
 ---
+
 > [!NOTE]
 >### ⚡ Quick Start: Want to test Stratum without compiling from scratch?
 >
@@ -27,8 +28,14 @@ Write real Android apps — UI, sensors, camera, canvas, background services —
 >
 >Skip the build pipeline and test a complete, working demo immediately:
 >
+>### <mark>📦 **Android Project with Prebuilt Stratum:** 
+>
+>Includes Python 3.14, precompiled `libstratum.so` binaries, and a ready-to-run >Android Studio project
+>
+>https://github.com/a-s-l-a-h/stratum_android_py_3_14/releases/tag/v0.3-tag
+>
 >* 📱 **Demo Project:** [**stratum_android_py_3_14**](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
->* 📦 **Prebuilt stratum included android project:** [**Download v0.3 (`.zip`)**](https://github.com/a-s-l-a-h/>stratum_android_py_3_14/releases/tag/v0.3-tag) *(Includes Python 3.14, precompiled `libstratum.so` binaries, and a ready-to-run >Android Studio project)*
+
 
 
 ---
