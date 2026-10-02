@@ -3,6 +3,8 @@
 > 
 > Stratum now supports embedded Python Android builds provided directly from [python.org](https://www.python.org/downloads/android/).
 >
+>👉 **Using or prefer Chaquopy?**  
+>The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
 
 ---
 <div align="center">
@@ -43,8 +45,7 @@ Write real Android apps — UI, sensors, camera, canvas, background services —
 
 *⚠️ **Note:** Documentation and instructions may occasionally lag behind recent code changes.*
 
-👉 **Using or prefer Chaquopy?**  
-The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+
 
 ---
 
