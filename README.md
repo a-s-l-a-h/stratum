@@ -9,6 +9,7 @@
 
 # 🌉 Stratum
 
+[🚀 Stratum Template (Python 3.14 ) ](https://github.com/a-s-l-a-h/stratum_android_py_3_14) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
 
 Write real Android apps — UI, sensors, camera, canvas, background services — in plain Python.
 
@@ -16,34 +17,27 @@ Write real Android apps — UI, sensors, camera, canvas, background services —
 * **Compiled Metadata:** Extracts and precomputes all Android SDK class, method, and field signatures into compact, deduplicated C++ tables at build time.
 
 
-[🚀 Stratum Template (Python 3.14 ) ](https://github.com/a-s-l-a-h/stratum_android_py_3_14) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
-
 </div>
 
 ---
-
-### ⚡ Quick Start: Want to test Stratum without compiling from scratch?
-
----
-
-Skip the build pipeline and test a complete, working demo immediately:
-
-* 📱 **Demo Project:** [**stratum_android_py_3_14**](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
-* 📦 **Prebuilt stratum included android project:** [**Download v0.3 (`.zip`)**](https://github.com/a-s-l-a-h/stratum_android_py_3_14/releases/tag/v0.3-tag) *(Includes Python 3.14, precompiled `libstratum.so` binaries, and a ready-to-run Android Studio project)*
-
-
----
-
-
-
-
 > [!NOTE]
-> 👉 **Using or prefer Chaquopy?**  
-> The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+>### ⚡ Quick Start: Want to test Stratum without compiling from scratch?
+>
+>---
+>
+>Skip the build pipeline and test a complete, working demo immediately:
+>
+>* 📱 **Demo Project:** [**stratum_android_py_3_14**](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
+>* 📦 **Prebuilt stratum included android project:** [**Download v0.3 (`.zip`)**](https://github.com/a-s-l-a-h/>stratum_android_py_3_14/releases/tag/v0.3-tag) *(Includes Python 3.14, precompiled `libstratum.so` binaries, and a ready-to-run >Android Studio project)*
 
+
+---
 
 
 *⚠️ **Note:** Documentation and instructions may occasionally lag behind recent code changes.*
+
+👉 **Using or prefer Chaquopy?**  
+The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
 
 ---
 
