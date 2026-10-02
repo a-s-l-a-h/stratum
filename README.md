@@ -7,8 +7,7 @@
 > Check out the complete Android Studio integration with embedded Python 3.14:  
 > **[`stratum_android_py_3_14`](https://github.com/a-s-l-a-h/stratum_android_py_3_14)**
 > 
-> 👉 **Using or prefer Chaquopy?**  
-> The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
+
 
 ---
 
@@ -21,12 +20,34 @@
 
 Write real Android apps — UI, sensors, camera, canvas, background services — in plain Python.
 
+
+---
+
+### ⚡ Quick Start: Want to test Stratum without compiling from scratch?
+
+Skip the build pipeline and test a complete, working demo immediately:
+
+* 📦 **Prebuilt Demo Android Project:** [**stratum_android_py_3_14**](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
+* 🚀 **Ready-to-Run Release (WIP):** [**Download v0.3 Prebuilt Release (`.zip`)**](https://github.com/a-s-l-a-h/stratum_android_py_3_14/releases/tag/v0.3-tag)
+
+> **What's included in the prebuilt release (`stratum-android-py3.14-with-prebuilts.zip`):**
+> * 🐍 **Embedded CPython 3.14.7** from python.org.
+> * 📱 **Precompiled `libstratum.so`** native binaries for `arm64-v8a` and `x86_64`.
+> * 📝 **Full typing stubs (`.pyi`)** for IDE autocompletion.
+> * 💻 **Ready-to-open Android Studio workspace** 
+
+---
+
 * **Compiled Metadata:** Extracts and precomputes all Android SDK class, method, and field signatures into compact, deduplicated C++ tables at build time.
 
 
 [🚀 Stratum Template (Python 3.14 ) ](https://github.com/a-s-l-a-h/stratum_android_py_3_14) • [Quick Start](#-quick-start) • [Why Stratum](#-why-stratum) • [Python API Guide](PYTHON_API.md) • [Architecture](#-architecture) • [Building the Engine](#-building-the-engine-pipeline)
 
 </div>
+
+> [!TIP]
+> 👉 **Using or prefer Chaquopy?**  
+> The Chaquopy-based pipeline is fully preserved on the **[`last-chaquopy-based-v0.3_6_5`](https://github.com/a-s-l-a-h/stratum/tree/last-chaquopy-based-v0.3_6_5)** branch.
 
 
 
