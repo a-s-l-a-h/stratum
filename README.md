@@ -4,8 +4,11 @@
 > Stratum now supports embedded Python Android builds provided directly from [python.org](https://www.python.org/downloads/android/).
 >
 
+---
 
 ### ⚡ Quick Start: Want to test Stratum without compiling from scratch?
+
+---
 
 Skip the build pipeline and test a complete, working demo immediately:
 
